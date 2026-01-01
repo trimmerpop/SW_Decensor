@@ -46,6 +46,7 @@ using BepInEx.Unity.Mono;
 // Polyfills for older .NET runtimes that are missing compiler-generated attributes.
 // This allows projects targeting newer C# versions to run on older Unity runtimes (like .NET 3.5)
 // without encountering a TypeLoadException.
+#if !bie6mono && !interop
 namespace System.Runtime.CompilerServices
 {
     [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = false)]
@@ -61,6 +62,7 @@ namespace System.Runtime.CompilerServices
         public IteratorStateMachineAttribute(Type stateMachineType) : base(stateMachineType) { }
     }
 }
+#endif
 
 #nullable enable
 namespace SW_Decensor
@@ -205,6 +207,8 @@ namespace SW_Decensor
         static MethodInfo? getSceneAtMethod = null;
         static MethodInfo? getRootGameObjectsMethod = null;
         static PropertyInfo? isLoadedProperty = null;
+        static PropertyInfo? gameObjectSceneProperty = null;
+        private static GameObject? ddolAnchor = null;
 
         static System.Type? UI_Image_Type = null;
 #if interop
@@ -360,6 +364,12 @@ namespace SW_Decensor
             }
             catch { }
 
+            try
+            {
+                gameObjectSceneProperty = typeof(GameObject).GetProperty("scene");
+            }
+            catch { }
+
 #if !interop
             try
             {
@@ -369,6 +379,9 @@ namespace SW_Decensor
             catch { bUseCoroutine = false; }
 #endif
 
+            ddolAnchor = new GameObject("DDOL_Anchor_SW_Decensor");
+            DontDestroyOnLoad(ddolAnchor);
+            ddolAnchor.hideFlags = HideFlags.HideAndDontSave;
         }
 
         /// <summary>
@@ -715,6 +728,33 @@ namespace SW_Decensor
                         GOS.AddRange((GameObject[])sceneResult);
 #endif
                     }
+
+                    if (ddolAnchor != null && gameObjectSceneProperty != null)
+                    {
+                        var ddolScene = gameObjectSceneProperty.GetValue(ddolAnchor, null);
+                        if (ddolScene != null)
+                        {
+                            object ddolResult = getRootGameObjectsMethod.Invoke(ddolScene, null);
+                            if (ddolResult != null)
+                            {
+#if interop
+                                if (ddolResult is Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<GameObject> il2cppArray)
+                                {
+                                    GOS.AddRange(il2cppArray);
+                                }
+                                else if (ddolResult is GameObject[] goArray)
+                                {
+                                    GOS.AddRange(goArray);
+                                }
+#else
+                                GOS.AddRange((GameObject[])ddolResult);
+#endif
+                            }
+                        }
+                    }
+
+                    GOS = GOS.Distinct().ToList();
+
                     gotRoots = true;
                 }
                 catch(Exception e)
