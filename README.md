@@ -72,20 +72,22 @@ Same as ShaderPropertiesFloat. Note that value sets are separated by ":".
 
 maximumLOD = -2. It's a like magic. Some games will disable the shader because of this. I don't know much about Unity, but sometimes giving this value -2 or 0 will eliminate the headache. However, it can also produce strange results. The default value of 1 means not used.
 
+#### ShaderReplace =
+
+Some games cannot delete materials, so they disable shaders by replacing them.
+
 \## Use shader replace method. ex) Standard Mosaic=Standard
 
 \# Setting type: String
 
 \# Default value:
 
-#### ShaderReplace =
+#### LayerReplace =
 
-Some games cannot delete materials, so they disable shaders by replacing them.
+change to Layer to another Layer. The value is set automatically, but if you don't want to change it, just enter the same value. (Example: Standard=Standard)
 
 \## Use layer replace method. ex) Mosaic=Default
 
 \# Setting type: String
 
 \# Default value:
-
-#### LayerReplace =
