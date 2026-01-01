@@ -15,23 +15,6 @@ I'm thinking about creating a separate analysis tool.
 This is a tool that allows you to make detailed settings, but many things are set to default values, so some games may have broken graphics with the initial settings.
 
 ### About Config file
-\## Only checks Renderers. if set to false, Check GameObjects & Renderers
-
-\# Setting type: Boolean
-
-\# Default value: false
-
-#### RendererOnlyCheckMode = false
-
-It's a like working as old uncensor plugin. some game has over 20,000 GameObject. (ex. 地下城の女騎士(The Knight Girl and Dungeons) has over 59,000 GameObject & over 28,000 Renderers on runtime)
-
-If GameObjects count is over 10,000, change to RendererOnly mode.(first run(config file is not exists) only).
-
-\## Be searched strings. Can use wildcard(*). If capital characters are used, treat as Case Sensitive.
-
-\# Setting type: String
-
-\# Default value:
 
 #### Keywords = *moza*, *mosa*, blah blah
 

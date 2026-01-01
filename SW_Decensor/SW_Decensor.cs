@@ -1,88 +1,167 @@
-﻿using System;
-using System.Linq;
-using BepInEx;
+﻿using BepInEx;
 using BepInEx.Logging;
-using UnityEngine;
-using UnityEngine.Rendering;
-using BepInEx.Configuration;
-using System.IO;
-using System.Collections.Generic;
-using Common;
-using System.Reflection;
 using HarmonyLib;
-using Component = UnityEngine.Component;
-using System.Threading.Tasks;
+using Common;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Threading;
+using UnityEngine;
+using Application = UnityEngine.Application;
+using BepInEx.Configuration;
+using IEnumerator = System.Collections.IEnumerator;
+using Exception = System.Exception;
+using TimeSpan = System.TimeSpan;
+using DateTime = System.DateTime;
+using Type = System.Type;
+using MethodInfo = System.Reflection.MethodInfo;
+using Action = System.Action;
+using Array = System.Array;
+using MissingMethodException = System.MissingMethodException;
+using ArgumentOutOfRangeException = System.ArgumentOutOfRangeException;
+using ArgumentNullException = System.ArgumentNullException;
+using NullReferenceException = System.NullReferenceException;
 
-
-
-
-
-
-
-
+#if bie6mono
+using BepInEx.Unity.Mono;
+#endif
 
 #if interop
-using Il2CppInterop.Runtime;
+    using BepInEx.Unity.IL2CPP;
+    using Il2CppInterop.Runtime;
     using Il2CppInterop.Runtime.Injection;
-    using loader = SW_Decensor_il2cpp.loader;
     using Dictionary = Il2CppSystem.Collections.Generic;
     using Il2CppSystem.Collections;
-#endif
-#if mono
-    using loader = SW_Decensor_BE5.loader;
+    using Il2CppSystem;
+#else
     using Dictionary = System.Collections.Generic;
     using static MonoMod.Cil.RuntimeILReferenceBag.FastDelegateInvokers;
-    //using static UnityEngine.EventSystems.EventTrigger;
-    using System.Collections;
-using System.Threading;
-using UnityEngine.UI;
 #endif
+
+// Polyfills for older .NET runtimes that are missing compiler-generated attributes.
+// This allows projects targeting newer C# versions to run on older Unity runtimes (like .NET 3.5)
+// without encountering a TypeLoadException.
+namespace System.Runtime.CompilerServices
+{
+    [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = false)]
+    public class StateMachineAttribute : Attribute
+    {
+        public Type StateMachineType { get; private set; }
+        public StateMachineAttribute(Type stateMachineType) { StateMachineType = stateMachineType; }
+    }
+
+    [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = false)]
+    public sealed class IteratorStateMachineAttribute : StateMachineAttribute
+    {
+        public IteratorStateMachineAttribute(Type stateMachineType) : base(stateMachineType) { }
+    }
+}
 
 #nullable enable
 namespace SW_Decensor
 {
+    [BepInPlugin(Metadata.GUID, Metadata.MODNAME, Metadata.VERSION)]
+#if interop
+    public class loader : BasePlugin
+#else
+    public class loader : BaseUnityPlugin
+#endif
+    {
+        private static bool ShouldLog(LogLevel lv, bool force)
+        {
+#if DEBUG
+            return true;
+#else
+            return lv == LogLevel.Error || lv == LogLevel.Warning || force;
+#endif
+        }
+
+        public static void log(LogLevel lv, object data, bool force = false)
+        {
+            if (ShouldLog(lv, force))
+            {
+                llog?.Log(lv, data);
+            }
+        }
+
+        public static void log(LogLevel lv, System.Func<object> dataProvider, bool force = false)
+        {
+            if (ShouldLog(lv, force))
+            {
+                try
+                {
+                    llog?.Log(lv, dataProvider());
+                }
+                catch (Exception e)
+                {
+                    llog?.Log(LogLevel.Error, string.Format("Error generating log message: {0}", e.Message));
+                }
+            }
+        }
+
+        public static loader Instance;
+        internal static ManualLogSource llog;
+
+        private void Init()
+        {
+            Instance = this;
+#if interop
+            llog = this.Log;
+#else
+            llog = this.Logger;
+#endif
+            SW_Decensor.Init(this);
+        }
+
+#if interop
+        public override void Load()
+        {
+            Init();
+        }
+#else
+        internal void Awake()
+        {
+            Init();
+        }
+#endif
+    }
+
     public class SW_Decensor : MonoBehaviour
     {
-        internal static SW_Decensor Instance { get; private set; } = new SW_Decensor();
+        internal static SW_Decensor Instance { get; private set; }
+        public static loader Loader { get; private set; }
 
-        private static ConfigFile configFile { get; set; } = new ConfigFile($"{Paths.ConfigPath}\\{Common.Metadata.MODNAME}.ini", false);
+        private static ConfigFile configFile { get; set; } = new ConfigFile(Path.Combine(Paths.ConfigPath, string.Format("{0}.ini", Common.Metadata.MODNAME)), false);
         private const string SectionName = "Config";
-        //public static ConfigEntry<bool> WorkOnSceneChanged { get; set; } = configFile.Bind<bool>(
-        //        SectionName,
-        //        "WorkOnSceneChanged",
-        //        false,
-        //        "Works on Scene changed only. this makes reduces lag."
-        //        );
-        public static ConfigEntry<bool> RendererOnlyCheckMode { get; set; } = configFile.Bind<bool>(
-                SectionName,
-                "RendererOnlyCheckMode",
-                false,
-                "Only checks Renderers. if set to false, Check GameObjects & Renderers"
-                );
         public static ConfigEntry<string> KeyWords { get; set; } = configFile.Bind<string>(
                 SectionName,
                 "Keywords",
                 string.Empty,
                 "Be searched strings. Can use wildcard(*). If capital characters are used, treat as Case Sensitive."
-                );   // 찾을 문자들
+                );
         public static ConfigEntry<string> RemoveKeyWords { get; set; } = configFile.Bind<string>(
                 SectionName,
                 "RemoveKeyWords",
                 string.Empty,
                 "Keywords for remove. Check the GameObject, Renderer, Material, Shader name."
-                ); // 삭제할 문자들
+                );
         public static ConfigEntry<string> ShaderPropertiesFloat { get; set; } = configFile.Bind<string>(
                 SectionName,
                 "ShaderPropertiesFloat",
                 DecensorTools.default_ShaderPropertiesFloat,
                 "Set float value to Material Shader Properties."
-                );  // material SetFloat
+                );
         public static ConfigEntry<string> ShaderPropertiesVector { get; set; } = configFile.Bind<string>(
                 SectionName,
                 "ShaderPropertiesVector",
                 DecensorTools.default_ShaderPropertiesVector,
-                $"Set vector value to Material Shader Properties. seperator({DecensorTools.separator_vector})"
-                ); // material SetVector
+                string.Format("Set vector value to Material Shader Properties. seperator({0})", DecensorTools.separator_vector)
+                );
         public static ConfigEntry<int> maximumLOD { get; set; } = configFile.Bind<int>(
                 SectionName,
                 "maximumLOD",
@@ -94,130 +173,87 @@ namespace SW_Decensor
                 "ShaderReplace",
                 string.Empty,
                 "Use shader replace method. ex) Standard Mosaic=Standard"
-                );   // shader 바꿔치기
+                );
         public static ConfigEntry<string> LayerReplace { get; set; } = configFile.Bind<string>(
                 SectionName,
                 "LayerReplace",
                 string.Empty,
                 "Use layer replace method. ex) Mosaic=Default"
-                );    // Layer 바꿔치기
-        //public static ConfigEntry<double> LoopTimeLimit { get; set; } = configFile.Bind<double>(
-        //        SectionName,
-        //        "LoopTimeLimit",
-        //        new TimeSpan(0, 0, 0, 0, 1).TotalMilliseconds,
-        //        "Time limit of process per update(). Unit:ms"
-        //        ); // OnGUI() 당 처리 제한 시간
-        //public static ConfigEntry<double> CheckInterval { get; set; } = configFile.Bind<double>(
-        //        SectionName,
-        //        "CheckInterval",
-        //        new TimeSpan(0, 0, 0, 2).TotalMilliseconds,
-        //        "Time interval between full checks. Unit:ms"
-        //        ); // 한바퀴 처리 후 쉬는 시간
+                );
 
         static List<GameObject> GOS = new List<GameObject>();
-        //static int GOS_index = -1;
-        //static int GOS_count = 0;
         static TimeSpan tsLoopTimeLimit;
-        //static TimeSpan tsLoopTimeLimit_check = TimeSpan.FromMilliseconds(5000); // 이시간이 지나도록 새로운 GOS를 구하지 않는다면 tsLoopTimeLimit를 조절
         static TimeSpan tsLoopTimeLimit_level_min = TimeSpan.FromMilliseconds(0.7f);
         static TimeSpan tsLoopTimeLimit_level_default = TimeSpan.FromMilliseconds(1.5f);
         static TimeSpan tsLoopTimeLimit_level_max = TimeSpan.FromMilliseconds(50);
-        //static int tsLoopTimeLimit_level = 1;
-        //static DateTime? LastGetGOS = null; // 마지막으로 GOS 구학 시각
         static TimeSpan tsCheckInterval;
         static DateTime? next_check = null;
-        //static int? OldSceneId = null;
         static Dictionary<string, string> shader_replace = new Dictionary<string, string>();
         static Dictionary<int, int> layer_replace = new Dictionary<int, int>();
-        // Layer에 갯수를 체크. layer에 GO갯수가 switchToLayerReplaceAllCount를 넘기면 전부 replace.(-1로 set)
         static Dictionary<int, int> layer_replace_count = new Dictionary<int, int>();
         static Dictionary<string, float> PropertiesFloat = new Dictionary<string, float>();
-        static Dictionary<string, UnityEngine.Vector4> PropertiesVector = new Dictionary<string, UnityEngine.Vector4>();
-        static bool bCheckLayer = false;    // LayerReplace 기능 사용여부. layer_replace의 갯수를 매번 세기에 따로 변수 만듦.
-        static bool bInit_success = true;   // 각 초기값 초기화 완료?
-        //static bool bNeedProcess = false;   // WorkOnSceneChanged 를 사용하는 경우, 이 값이 true일 때 처리함
-
-        //static bool bIsForceSetValue = false;    // SetFloat 등을 호출 할 때 또 체크 안하도록
+        static Dictionary<string, Vector4> PropertiesVector = new Dictionary<string, Vector4>();
+        static bool bCheckLayer = false;
+        static bool bInit_success = true;
         static bool bIsOverUnity2019_3 = false;
-        //static MethodInfo GetPropertyRangeLimits = null;
-        //static bool bGetPropertyRangeLimits = false;
-        //static MethodInfo GetPropertyName = null;
-        // GetPropertyType가 null 인지 체크하는 식으로 했었으나, 유니티2017.3 에서 비교문 때문에 문제가 발생하여 따로 변수를 만들어 처리.
         static bool bGetPropertyType = false;
         static MethodInfo? GetPropertyType = null;
         static bool bFindPropertyIndex = false;
         static MethodInfo? FindPropertyIndex = null;
         static MethodInfo? GetActiveScene = null;
+        static PropertyInfo? sceneCountProperty = null;
+        static MethodInfo? getSceneAtMethod = null;
+        static MethodInfo? getRootGameObjectsMethod = null;
+        static PropertyInfo? isLoadedProperty = null;
 
-        static int GOS_count = 0;   // 처리한 GameObject count
-        static Renderer[] renderers = new Renderer[0];
-        static int renderers_count = 0;
+        static System.Type? UI_Image_Type = null;
+#if interop
+        static Il2CppSystem.Type? Il2Cpp_UI_Image_Type = null;
+#endif
+        static bool bUI_Image_Type_Checked = false;
+        static PropertyInfo? UI_Image_material_Prop = null;
+        static PropertyInfo? UI_Image_enabled_Prop = null;
+
+        static int GOS_count = 0;
         static int renderers_index = -1;
-        static bool bIsFirstSet = false;    // 처음 ini 파일 만드는가?
         static int lastScene = -1;
         static int scene_loop_count = 0;
-        static Dictionary<string, Vector2> PropertiesFloatLimit = new Dictionary<string, Vector2>();
         static bool bUseCoroutine = false;
-        static bool bUseTask = true;
+        static bool bUseTask = false;
         static bool bGetting_GOS = false;
         static int lastCheckedCount = 0;
         static int lastCheckedSameCount = 0;
-        static int GetGOS_TooLate_Count = 0;    // GOS를 구하는 시간이 switchToRendererModeTimeSpan 를 10번 넘기면 RendererOnlyMode 로.
 
-
-        public static void Setup()
+        internal static void Setup()
         {
 #if interop
-            try
-            {
-                ClassInjector.RegisterTypeInIl2Cpp<SW_Decensor>();
-            }
-            catch { }
+            ClassInjector.RegisterTypeInIl2Cpp<SW_Decensor>();
 #endif
+
             GameObject obj = new GameObject(Metadata.MODNAME);
             DontDestroyOnLoad(obj);
             obj.hideFlags = HideFlags.HideAndDontSave;
-            try
-            {
-                obj.transform.parent = null;
-                Instance = obj.AddComponent<SW_Decensor>();
-            }
-            catch (Exception e)
-            {
-                loader.log(LogLevel.Error, $"instance Init Error. {e.Message}");
-            }
+            Instance = obj.AddComponent<SW_Decensor>();
         }
 
-
-        private void Awake()
+        public static void Init(loader loader)
         {
-            //tsLoopTimeLimit = TimeSpan.FromMilliseconds(LoopTimeLimit.Value);
-            //tsCheckInterval = TimeSpan.FromMilliseconds(CheckInterval.Value);
+            if (Loader != null)
+                throw new Exception(string.Format("{0} is already loaded.", Metadata.MODNAME));
+            Loader = loader;
+            Setup();
             tsLoopTimeLimit = TimeSpan.FromMilliseconds(1);
             tsCheckInterval = TimeSpan.FromMilliseconds(500);
-
         }
 
         void Start()
         {
             try
             {
-#if interop
-                bUseTask = false;
-#else
-                try
-                {
-                    testAsync();
-                }
-                catch (Exception)
-                {
-                    bUseTask = false;
-                }
-#endif
+                bUseTask = CheckAsyncTaskSupport();
+
                 if (KeyWords.Value == string.Empty && RemoveKeyWords.Value == string.Empty)
                 {
-                    bIsFirstSet = true;
-
                     KeyWords.Value = DecensorTools.default_KeyWords;
                     RemoveKeyWords.Value = DecensorTools.default_RemoceKeyWords;
 
@@ -252,21 +288,14 @@ namespace SW_Decensor
                 // Properties
                 PropertiesFloat_set(ShaderPropertiesFloat.Value);
                 PropertiesVector_set(ShaderPropertiesVector.Value);
-
                 ShaderReplace_set();
-
-                // layer 명으로 layer_replace 구성
                 string layer_set = LayerReplace_set();
-                if (LayerReplace.Value != layer_set)    // 값이 없을 경우, 키워드로 찾아보기에 문자열이 바뀔 수 있음.
+                if (LayerReplace.Value != layer_set)
                     LayerReplace.Value = layer_set;
                 foreach (KeyValuePair<int, int> item in layer_replace)
                 {
                     layer_replace_count[item.Key] = 0;
                 }
-            }
-            catch (System.TypeLoadException e)
-            {
-                loader.log(LogLevel.Error, e.Message);
             }
             catch (Exception e)
             {
@@ -274,150 +303,62 @@ namespace SW_Decensor
                 loader.log(LogLevel.Error, e.Message);
             }
 
-            // Unity 버전 체크.
-            if (string.Compare( Application.unityVersion, "2019.3" ) >= 0)
+            if (string.Compare(Application.unityVersion, "2019.3") >= 0)
                 bIsOverUnity2019_3 = true;
 
-            Harmony harmony = new Harmony(Metadata.GUID + ".patch");
-            //harmony.PatchAll();
-            MethodInfo original, patch;
-            //try
-            //{
-            //    original = AccessTools.Method(typeof(GameObject), "SetActive");
-            //    patch = AccessTools.Method(typeof(GameObject_SetActive), "Postfix");
-            //    harmony.Patch(original, postfix: new HarmonyMethod(patch));
-            //}
-            //catch (Exception e)
-            //{
-            //    loader.log(LogLevel.Warning, $"GameObject.SetActive() patch failed. Don't care it.\n{e.Message}");
-            //}
-
-#if USE_SETVALUE_HOOK   // 사용하지 않는 것이 안정적일 듯한.
-            try
-            {
-                original = AccessTools.Method(typeof(Material), "SetFloat", new Type[] { typeof(string), typeof(float) });
-                patch = AccessTools.Method(typeof(Material_SetFloat_string), "Prefix");
-                harmony.Patch(original, prefix: new HarmonyMethod(patch));
-            }
-            catch (Exception e)
-            {
-                loader.log(LogLevel.Warning, $"Material.SetFloat() (string) patch failed. Don't care it.\n{e.Message}");
-            }
-#if intgerop || true
-            try
-            {
-                original = AccessTools.Method(typeof(Material), "SetFloat", new Type[] { typeof(int), typeof(float) });
-                patch = AccessTools.Method(typeof(Material_SetFloat_int), "Prefix");
-                harmony.Patch(original, prefix: new HarmonyMethod(patch));
-            }
-            catch (Exception e)
-            {
-                loader.log(LogLevel.Warning, $"Material.SetFloat() (int) patch failed. Don't care it.\n{e.Message}");
-            }
-            try
-            {
-                original = AccessTools.Method(typeof(Material), "SetVector", new Type[] { typeof(int), typeof(Vector4) });
-                patch = AccessTools.Method(typeof(Material_SetVector_int), "Prefix");
-                harmony.Patch(original, prefix: new HarmonyMethod(patch));
-            }
-            catch (Exception e)
-            {
-                loader.log(LogLevel.Warning, $"Material.SetVector() (int) patch failed. Don't care it.\n{e.Message}");
-            }
-#endif
-            try
-            {
-                original = AccessTools.Method(typeof(Material), "SetVector", new Type[] { typeof(string), typeof(Vector4) });
-                patch = AccessTools.Method(typeof(Material_SetVector_string), "Prefix");
-                harmony.Patch(original, prefix: new HarmonyMethod(patch));
-            }
-            catch (Exception e)
-            {
-                loader.log(LogLevel.Warning, $"Material.SetVector() (string) patch failed. Don't care it.\n{e.Message}");
-            }
-#endif
-
-            //try
-            //{
-            //    GetPropertyRangeLimits = AccessTools.Method("UnityEngine.Shader:GetPropertyRangeLimits");
-            //    Type[] args = GetPropertyRangeLimits.GetGenericArguments();
-            //    if (args.Length >= 0)
-            //        bGetPropertyRangeLimits = true;
-            //}
-            //catch (Exception)
-            //{
-            //    loader.log(LogLevel.Warning, $"Can't use GetPropertyRangeLimits. Don't care it.");
-            //}
-
-            //GetPropertyName = AccessTools.Method("UnityEngine.Rendering:GetPropertyName");
             try
             {
                 FindPropertyIndex = AccessTools.Method("UnityEngine.Shader:FindPropertyIndex");
-                Type[] args = FindPropertyIndex.GetGenericArguments();
-                if (args.Length >= 0)
+                if (FindPropertyIndex != null)
                     bFindPropertyIndex = true;
             }
-            catch (Exception)
-            {
-                loader.log(LogLevel.Warning, $"Can't use FindPropertyIndex. Don't care it.");
-            }
+            catch (Exception) { }
 
-            // 아래 줄을 넣으면 유니티 2017.3에서는
-            // MissingMethodException: Method not found: 'System.Reflection.MethodInfo.op_Inequality'.
-            // 에러나면서 이 start()가 무효화 됨..
-            //loader.log(LogLevel.Warning, $"GetPropertyType {GetPropertyType != null}");
             try
             {
                 GetPropertyType = AccessTools.Method("UnityEngine.Shader:GetPropertyType", new Type[] { typeof(int) });
-                Type[] args = GetPropertyType.GetGenericArguments();
-                //loader.log(LogLevel.Warning, $"  GetPropertyType type {args.Length}");
-                if (args.Length >= 0)
+                if (GetPropertyType != null)
                     bGetPropertyType = true;
             }
-            catch (NullReferenceException)
-            {
-                try
-                {
-                    GetPropertyType = AccessTools.Method("UnityEngine.Rendering:GetPropertyType", new Type[] { typeof(int) });
-                    Type[] args = GetPropertyType.GetGenericArguments();
-                    if (args.Length >= 0)
-                        bGetPropertyType = true;
-                }
-                catch (Exception)
-                {
-                    loader.log(LogLevel.Warning, $"Can't use GetPropertyType. Don't care it.");
-                }
-            }
-            catch (Exception)
-            {
-                loader.log(LogLevel.Warning, $"Can't use GetPropertyType. Don't care it.");
-            }
-
-            //loader.log(LogLevel.Info, $"bGetPropertyType {bGetPropertyType}");
+            catch (Exception) { }
 
             try
             {
-
                 GetActiveScene = AccessTools.Method("UnityEngine.SceneManagement.SceneManager:GetActiveScene");
-            }
-            catch (Exception)
-            {
-                loader.log(LogLevel.Warning, $"Can't use GetActiveScene. Don't care it.");
-            }
 
-            //var scenemanager = (from assembly in AppDomain.CurrentDomain.GetAssemblies()
-            //                    from type in assembly.GetTypes()
-            //                    where type.Name == "SceneManager" && type.GetMethods().Any(m => m.Name == "GetActiveScene")
-            //                    select type);
-            //if (scenemanager.Count() == 1)
-            //{
-            //    Type scene = scenemanager.GetType();
-            //    Type[] interfaces = scene.GetInterfaces();
-            //    foreach (Type type in interfaces)
-            //    {
-            //        loader.log(LogLevel.Warning, $"scene type {type}");
-            //    }
-            //}
+                Type sceneManagerType = Type.GetType("UnityEngine.SceneManagement.SceneManager, UnityEngine.CoreModule");
+                if (sceneManagerType != null)
+                {
+                    sceneCountProperty = sceneManagerType.GetProperty("sceneCount", BindingFlags.Public | BindingFlags.Static);
+                    getSceneAtMethod = sceneManagerType.GetMethod("GetSceneAt", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(int) }, null);
+
+                    Type sceneType = Type.GetType("UnityEngine.SceneManagement.Scene, UnityEngine.CoreModule");
+                    if (sceneType != null)
+                    {
+                        isLoadedProperty = sceneType.GetProperty("isLoaded", BindingFlags.Public | BindingFlags.Instance);
+                        getRootGameObjectsMethod = sceneType.GetMethod("GetRootGameObjects", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                    }
+                }
+            }
+            catch (Exception) { }
+
+            try
+            {
+                if (!bUI_Image_Type_Checked)
+                {
+                    UI_Image_Type = System.Type.GetType("UnityEngine.UI.Image, UnityEngine.UI");
+#if interop
+                    Il2Cpp_UI_Image_Type = Il2CppSystem.Type.GetType("UnityEngine.UI.Image, UnityEngine.UI");
+#endif
+                    if (UI_Image_Type != null)
+                    {
+                        UI_Image_material_Prop = UI_Image_Type.GetProperty("material");
+                        UI_Image_enabled_Prop = UI_Image_Type.GetProperty("enabled");
+                    }
+                    bUI_Image_Type_Checked = true;
+                }
+            }
+            catch { }
 
 #if !interop
             try
@@ -425,104 +366,101 @@ namespace SW_Decensor
                 StartCoroutine("DoMain_Iemu");
                 bUseCoroutine = true;
             }
-            catch { }
+            catch { bUseCoroutine = false; }
 #endif
+
         }
 
-
-        async void testAsync()
+        /// <summary>
+        /// 런타임에 'System.Threading.Tasks.Task' 타입을 찾아보고,
+        /// 존재한다면 리플렉션을 통해 Task.Run을 호출하여 async/await와 유사한 기능의 지원 여부를 확인합니다.
+        /// 이를 통해 컴파일 타임에 async 키워드를 사용하지 않아 구버전과의 호환성을 유지합니다.
+        /// </summary>
+        bool CheckAsyncTaskSupport()
         {
-            await new Task(() => { Thread.Sleep(1); });
+            bool bUseAsync = false;
+            try
+            {
+                // 'System.Threading.Tasks.Task' 타입이 현재 런타임에 존재하는지 확인
+                Type taskType = Type.GetType("System.Threading.Tasks.Task");
+                if (taskType == null)
+                {
+                    return false;
+                }
+
+                // Task.Run(Action) 메서드 정보 가져오기
+                MethodInfo runMethod = taskType.GetMethod("Run", new[] { typeof(Action) });
+                if (runMethod == null)
+                {
+                    return false;
+                }
+
+                // 실제 테스트 실행 (예: Thread.Sleep)
+                Action testAction = () => { Thread.Sleep(1); };
+                var taskObject = runMethod.Invoke(null, new object[] { testAction });
+
+                // 여기까지 예외 없이 실행되면 Task.Run을 사용할 수 있다고 판단
+                bUseAsync = true;
+                loader.log(LogLevel.Info, "Async Task support detected.");
+            }
+            catch (Exception ex)
+            {
+                loader.log(LogLevel.Info, $"Async Task support check failed: {ex.Message}");
+                bUseAsync = false;
+            }
+            return bUseAsync;
         }
+
 
         public enum ShaderPropertyType
         {
-            Color = 0,
-            Vector = 1,
-            Float = 2,
-            Range = 3,
-            Texture = 4,  // TexEnv -> Texture
-            TexEnv = 4
+            Color = 0, Vector = 1, Float = 2, Range = 3, Texture = 4, TexEnv = 4
         }
 
         void PropertiesFloat_set(string str)
         {
-            string[] key_str = str.Split(DecensorTools.separator);
-            foreach (string item_ in key_str)
+            foreach (string item_ in str.Split(DecensorTools.separator))
             {
                 string item = item_.Trim();
                 string[] vari = item.Split('=');
-                if (vari.Count() == 2)
+                if (vari.Length == 2 && float.TryParse(vari[1], out float val))
                 {
-                    float val;
-                    // may be key's value can't be 0.
-                    //int key = Shader.PropertyToID(vari[0]);
-                    if (float.TryParse(vari[1], out val))
-                    {
-                        PropertiesFloat[vari[0]] = val;
-                    }
+                    PropertiesFloat[vari[0]] = val;
                 }
             }
-            //foreach (KeyValuePair<int, float> item in PropertiesFloat)
-            //{
-            //    loader.log(LogLevel.Info, $"  float  {item.Key}: {item.Value:0.#######}");
-            //}
         }
+
         void PropertiesVector_set(string str)
         {
-            string[] key_str = str.Split(DecensorTools.separator_vector);
-            foreach (string item_ in key_str)
+            foreach (string item_ in str.Split(DecensorTools.separator_vector))
             {
                 string item = item_.Trim();
                 string[] vari = item.Split('=');
-                if (vari.Count() == 2)
+                if (vari.Length == 2)
                 {
                     try
                     {
-                        var val = vari[1].ToVector4(",", " ");
-                        PropertiesVector[vari[0]] = val;
+                        PropertiesVector[vari[0]] = vari[1].ToVector4(",", " ");
                     }
                     catch { }
                 }
             }
-            //foreach(KeyValuePair<int, Vector4> item in PropertiesVector)
-            //{
-            //    loader.log(LogLevel.Info, $"  vector  {item.Key}: {item.Value}");
-            //}
         }
 
         void ShaderReplace_set()
         {
-            // shader에 등록된 이름들이 있는 지 체크. shader_replace 구성.
             if (ShaderReplace.Value != string.Empty)
             {
-                string[] key_str = ShaderReplace.Value.Split(DecensorTools.separator);
-                foreach (string item_ in key_str)
+                foreach (string item_ in ShaderReplace.Value.Split(DecensorTools.separator))
                 {
                     string item = item_.Trim();
                     string[] shader = item.Split('=');
-                    if (shader.Count() == 2)
+                    if (shader.Length == 2 && Shader.Find(shader[0]) != null && Shader.Find(shader[1]) != null)
                     {
-                        bool bFound = true;
-                        if (Shader.Find(shader[0]) == null)
-                        {
-                            loader.log(LogLevel.Info, $"Shader Replace : {shader[0]} not found.");
-                            bFound = false;
-                        }
-                        if (Shader.Find(shader[1]) == null)
-                        {
-                            loader.log(LogLevel.Info, $"Shader Replace : {shader[1]} not found.");
-                            bFound = false;
-                        }
-                        if (bFound)
-                            shader_replace[shader[0]] = shader[1];
+                        shader_replace[shader[0]] = shader[1];
                     }
                 }
             }
-            //foreach (KeyValuePair<string, string> item in shader_replace)
-            //{
-            //    loader.log(LogLevel.Info, $"  shader replace  {item.Key} -> {item.Value}");
-            //}
         }
 
         string LayerReplace_set()
@@ -549,7 +487,7 @@ namespace SW_Decensor
                             loader.log(LogLevel.Info, $"  Layer {layer[0]} {org} -> {layer[1]} {tgt}");
                             bCheckLayer = true;
                             layer_replace_str = string.Format("{0}{1}{2}={3}",
-                                layer_replace_str, layer_replace_str == string.Empty ? "" : DecensorTools.separator+" ",
+                                layer_replace_str, layer_replace_str == string.Empty ? "" : DecensorTools.separator + " ",
                                 layer[0], layer[1]);
                         }
                     }
@@ -635,338 +573,181 @@ namespace SW_Decensor
         int CheckKnownShaders_MaximumLOD()
         {
             // 알려진 Shader MaximumLOD 값 설정
-            int ret = DecensorTools.default_MaximumLOD;
             foreach (string shad in DecensorTools.KnownShaders_MaximumLod__2)
             {
                 if (Shader.Find(shad) != null)
-                {
-                    ret = -2;
-                    break;
-                }
+                    return -2;
             }
-            return ret;
+            return DecensorTools.default_MaximumLOD;
         }
 
-        public static string RGB(string text, string RGB = "FFFFFF")
-        {
-            return string.Concat(new string[]
-            {
-                "<color=#",
-                RGB,
-                ">",
-                text,
-                "</color>"
-            });
-        }
-
-
-        //public Vector2 scrollPosition;
-        //public string longString = "메세지";
-        //Size panelSize = new Size(200, 600);
         void OnGUI()
         {
-            //scrollPosition = GUILayout.BeginScrollView(scrollPosition, GUILayout.Width(panelSize.width), GUILayout.Height(panelSize.height));
-            //{
-            //    GUILayout.Label(longString, new GUILayoutOption[] { });
-            //    if (GUILayout.Button("지우기", new GUILayoutOption[] { }))
-            //        longString = "";
-            //}
-            //GUILayout.EndScrollView();
-
-            //if (GUILayout.Button("메세지 추가", new GUILayoutOption[]
-            //{
-            //    GUILayout.ExpandWidth(true),
-            //    GUILayout.ExpandHeight(true)
-            //}))
-            //    longString += "\n헬로우 월드";
-
-            //GUILayout.BeginArea(new Rect((float)(Screen.width / 2 - panelSize.width / 2), (float)(Screen.height / 2 - panelSize.height / 2), (float)panelSize.width, (float)panelSize.height), RGB("GlitterInvitationClient by Kalybr50", "FFFFFF"), new GUIStyle());
-            //GUILayout.Space(30f);
-            //GUILayout.BeginVertical(new GUILayoutOption[]
-            //{
-            //        GUILayout.ExpandWidth(true),
-            //        GUILayout.ExpandHeight(true)
-            //});
-            //GUILayout.Label("Alice:", new GUILayoutOption[]
-            //{
-            //            GUILayout.Width(200f),
-            //            GUILayout.Height(30f)
-            //});
-            //GUILayout.EndVertical();
-            //GUILayout.EndArea();
-
             if (!bUseCoroutine)
             {
                 DoMain();
             }
-
         }
 
-#if !interop
         IEnumerator DoMain_Iemu()
         {
             while (true)
             {
                 yield return null;
-                //yield return new WaitForEndOfFrame();
                 DoMain();
             }
         }
-#endif
 
         void DoMain()
         {
-            if (!bGetting_GOS)
+            if (bGetting_GOS || !bInit_success) return;
+            
+            if (GetActiveScene != null)
             {
-                if (!bInit_success) return; // 유니티 버전에 따라 실패할 경우가 있음.
-                // scene buildIndex 로 scene이 바뀌었는지 체크
-                int SceneNum;
-                SceneNum = Application.loadedLevel;
-                if (lastScene != SceneNum)
+                var scene = GetActiveScene.Invoke(null, null);
+                if (scene != null)
                 {
-                    // scene 이 바뀌면 loop_1 reset
-                    lastScene = SceneNum;
-                    if (RendererOnlyCheckMode.Value)
-                        renderers_index = -1;
-                    else
-                        GOS.Clear();
-                    scene_loop_count = 0;
-                    //loader.log(LogLevel.Info, $"--------  Scene Changed {lastScene}");
-                }
-
-                //// LastGetGOS를 체크하여 tsLoopTimeLimit 조절
-                //if (LastGetGOS != null && tsLoopTimeLimit_level < tsLoopTimeLimit_level_max && DateTime.Now > LastGetGOS + tsLoopTimeLimit_check)
-                //{
-                //    tsLoopTimeLimit_level = tsLoopTimeLimit_level >= tsLoopTimeLimit_level_max ? tsLoopTimeLimit_level_max : tsLoopTimeLimit_level++;
-                //    tsLoopTimeLimit_check += TimeSpan.FromMilliseconds(5000);
-                //    tsLoopTimeLimit = TimeSpan.FromMilliseconds(tsLoopTimeLimit_level);
-                //    //loader.log(LogLevel.Warning, $"--------  tsLoopTimeLimit {tsLoopTimeLimit} --------");
-                //}
-
-                if (lastCheckedSameCount > DecensorTools.switchToSlow_GOSCountSame)
-                    tsLoopTimeLimit = tsLoopTimeLimit_level_min;
-                else
-                {
-                    // scene_loop_count 에 따라 tsLoopTimeLimit 조절
-                    switch (scene_loop_count)
+                    var handleProp = scene.GetType().GetProperty("handle");
+                    if (handleProp != null)
                     {
-                        case 0:
-                        case 1:
-                            tsLoopTimeLimit = tsLoopTimeLimit_level_max;
-                            break;
-                        case 2:
-                            tsLoopTimeLimit = tsLoopTimeLimit_level_default;
-                            break;
-                    }
-                }
-                //loader.log(LogLevel.Info, $"--------  scene_loop_count {scene_loop_count}");
-
-                if (bIsFirstSet && !RendererOnlyCheckMode.Value && GOS_count > DecensorTools.switchToRendererModeCount)
-                {
-                    loader.log(LogLevel.Warning, $"  GOS count {GOS_count}. Switch to RendererOnlyCheckMode");
-                    SwitchToRendererOnlyMode();
-                }
-
-                if (RendererOnlyCheckMode.Value)
-                {
-                    // renderers mode
-                    if (next_check != null && renderers_index >= 0 && renderers_count > 0)
-                    {
-                        DateTime LoopLimit = DateTime.Now + tsLoopTimeLimit;
-                        try
+                        int sceneHandle = (int)handleProp.GetValue(scene, null);
+                        if (lastScene != sceneHandle)
                         {
-                            do
-                            {
-                                if (Decensor_renderer(renderers[renderers_index]))
-                                    renderers_index++;
-                                else
-                                    renderers_index = -1;
-                            } while (renderers_index < renderers_count && (DateTime.Now < LoopLimit));
-                        }
-                        catch (NullReferenceException)
-                        {
-                            renderers_index = -1;
-                        }
-                        catch (IndexOutOfRangeException)
-                        {
-                            renderers_index = -1;
-                        }
-                        catch (Exception e)
-                        {
-                            loader.log(LogLevel.Error, $"Renderer Mode. {e.GetType()}\n{e.Message}");
-                            renderers_index = -1;
-                        }
-                    }
-                    else if (next_check == null || next_check < DateTime.Now)
-                    {
-                        if (renderers_index == -1)
+                            lastScene = sceneHandle;
+                            GOS.Clear();
                             scene_loop_count = 0;
-                        else
-                            scene_loop_count = scene_loop_count > 1 ? scene_loop_count : scene_loop_count + 1;
-
-                        if (!bGetting_GOS)
-                        {
-                            if (bUseTask)
-                                Get_Renderer_Async();
-                            else
-                                Get_Renderer();
-                        }
-                    }
-                }
-                else
-                {
-                    // GOS mode
-                    if (next_check != null && GOS.Count > 0)
-                    {
-                        DateTime LoopLimit = DateTime.Now + tsLoopTimeLimit;
-                        do
-                        {
-                            GameObject go = GOS.Last();
-                            GOS.RemoveAt(GOS.Count - 1);
-
-                            if (go != null)
-                            {
-                                if (bUseTask)
-                                    Add_GOS_Child_Async(go);
-                                else
-                                    Add_GOS_Child(go);
-                                Decensor_GameObject(go);
-                                GOS_count++;
-                            }
-                        } while (GOS.Count > 0 && (DateTime.Now < LoopLimit));
-                    }
-                    else if (next_check == null || next_check < DateTime.Now)
-                    {
-                        scene_loop_count = scene_loop_count > 1 ? scene_loop_count : scene_loop_count + 1;
-
-                        // 더 빨리 root의 GameObject를 구할 방법은 없을까. 10000건 넘어가면 lag 발생 (GlitterInvitation)
-                        //foreach (Transform xform in UnityEngine.Object.FindObjectsOfType<Transform>().Where(x => x.parent == null).ToArray())
-
-                        if (!bGetting_GOS)
-                        {
-                            if (bUseTask)
-                                Get_GOS_Async();
-                            else
-                                Get_GOS();
                         }
                     }
                 }
             }
+
+            tsLoopTimeLimit = (lastCheckedSameCount > DecensorTools.switchToSlow_GOSCountSame) ? tsLoopTimeLimit_level_min :
+                              (scene_loop_count < 2) ? tsLoopTimeLimit_level_max : tsLoopTimeLimit_level_default;
+
+            ProcessGameObjects();
         }
 
-
-        static async void Get_Renderer_Async()
+        void ProcessGameObjects()
         {
-            if (!bGetting_GOS)
+            if (next_check != null && GOS.Count > 0)
             {
-                Task task = Task.Factory.StartNew(() => Get_Renderer());
-                Thread.Sleep(1);
-                await task;
+                DateTime LoopLimit = DateTime.Now + tsLoopTimeLimit;
+                do
+                {
+                    GameObject go = GOS.Last();
+                    GOS.RemoveAt(GOS.Count - 1);
+
+                    if (go != null)
+                    {
+                        Add_GOS_Child(go);
+                        Decensor_GameObject(go);
+                        GOS_count++;
+                    }
+                } while (GOS.Count > 0 && DateTime.Now < LoopLimit);
+            }
+            else if (next_check == null || next_check < DateTime.Now)
+            {
+                scene_loop_count = System.Math.Min(scene_loop_count + 1, 2);
+                Get_GOS();
             }
         }
 
-        static void Get_Renderer()
-        {
-            bGetting_GOS = true;
-#if interop
-            var array = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Renderer>());
-            renderers = array.Select(x => x.Cast<Renderer>()).ToArray();
-#else
-            renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
-#endif
-            if (lastCheckedCount == renderers_count)
-                lastCheckedSameCount = lastCheckedSameCount > DecensorTools.switchToSlow_GOSCountSame ? lastCheckedSameCount = DecensorTools.switchToSlow_GOSCountSame + 1 : lastCheckedSameCount + 1;
-            else
-                lastCheckedSameCount = 0;
-            lastCheckedCount = renderers_count;
+        //private object currentTask;
+        //private IEnumerator WaitForTaskCoroutine()
+        //{
+        //    var task = currentTask;
+        //    var isCompletedProp = task.GetType().GetProperty("IsCompleted");
+        //    while (!(bool)isCompletedProp.GetValue(task, null))
+        //    {
+        //        yield return null;
+        //    }
 
-            renderers_count = renderers.Length;
-            loader.log(LogLevel.Info, $"--------  Renderers {renderers_count} {lastCheckedSameCount} --------");
-            if (renderers_count > 0)
-                renderers_index = 0;
-            next_check = DateTime.Now + tsCheckInterval;
-            bGetting_GOS = false;
-        }
+        //    var isFaultedProp = task.GetType().GetProperty("IsFaulted");
+        //    if ((bool)isFaultedProp.GetValue(task, null))
+        //    {
+        //        var exceptionProp = task.GetType().GetProperty("Exception");
+        //        var exception = exceptionProp.GetValue(task, null);
+        //        loader.log(LogLevel.Error, exception);
+        //    }
+        //}
 
-
-        static async void Add_GOS_Child_Async(GameObject go)
+        void Add_GOS_Child(GameObject go)
         {
-            Task task = Task.Factory.StartNew(() => Add_GOS_Child(go));
-            await task;
-        }
-        static void Add_GOS_Child(GameObject go)
-        {
-            bGetting_GOS = true;
             for (int i = 0; i < go.transform.childCount; i++)
             {
-                GameObject go_ = go.transform.GetChild(i).gameObject;
-                if (go_ != null)
-                    GOS.Add(go_);
-            }
-            bGetting_GOS = false;
-        }
-
-
-        static async void Get_GOS_Async()
-        {
-            if (!bGetting_GOS)
-            {
-                Task task = Task.Factory.StartNew(() => Get_GOS());
-                Thread.Sleep(1);
-                await task;
+                GOS.Add(go.transform.GetChild(i).gameObject);
             }
         }
 
-        static void Get_GOS()
+        void Get_GOS()
         {
             bGetting_GOS = true;
-            DateTime? now = null;
-            if (bIsFirstSet && !RendererOnlyCheckMode.Value)
-                now = DateTime.Now;
+            
             GOS.Clear();
-            Transform[] trs;
-#if interop
-            var array = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Transform>());
-            trs = array.Select(x => x.Cast<Transform>()).ToArray();
-#else
-            trs = UnityEngine.Object.FindObjectsOfType<Transform>();
-#endif
-            foreach (Transform xform in trs)
-            {
-                if (xform.parent == null)
-                    GOS.Add(xform.gameObject);
-            }
+            bool gotRoots = false;
 
-            if (lastCheckedCount == GOS_count)
-                lastCheckedSameCount = lastCheckedSameCount > DecensorTools.switchToSlow_GOSCountSame ? lastCheckedSameCount = DecensorTools.switchToSlow_GOSCountSame + 1 : lastCheckedSameCount + 1;
-            else
-                lastCheckedSameCount = 0;
-            lastCheckedCount = GOS_count;
-
-            loader.log(LogLevel.Info, $"--------  GOS(root) {GOS.Count} prev total {GOS_count} {lastCheckedSameCount} --------");
-            GOS_count = 0;
-            //LastGetGOS = DateTime.Now;
-            next_check = DateTime.Now + tsCheckInterval;
-            if (bIsFirstSet && !RendererOnlyCheckMode.Value)
+            if (sceneCountProperty != null && getSceneAtMethod != null && getRootGameObjectsMethod != null && isLoadedProperty != null)
             {
-                if ((DateTime.Now - now) > DecensorTools.switchToRendererModeTimeSpan)
+                try
                 {
-                    GetGOS_TooLate_Count++;
-                    if (GetGOS_TooLate_Count > 10)
+                    int sceneCount = (int)sceneCountProperty.GetValue(null, null);
+                    for (int i = 0; i < sceneCount; i++)
                     {
-                        loader.log(LogLevel.Warning, $"  Get_GOS takes too longtome.({DateTime.Now - now}) Switch to RendererOnlyCheckMode");
-                        SwitchToRendererOnlyMode();
+                        object scene = getSceneAtMethod.Invoke(null, new object[] { i });
+                        if (scene == null || !(bool)isLoadedProperty.GetValue(scene, null))
+                        {
+                            continue;
+                        }
+
+                        object sceneResult = getRootGameObjectsMethod.Invoke(scene, null);
+                        if (sceneResult == null) continue;
+
+#if interop
+                        if (sceneResult is Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<GameObject> il2cppArray)
+                        {
+                            GOS.AddRange(il2cppArray);
+                        }
+                        else if (sceneResult is GameObject[] goArray)
+                        {
+                            GOS.AddRange(goArray);
+                        }
+#else
+                        GOS.AddRange((GameObject[])sceneResult);
+#endif
                     }
+                    gotRoots = true;
+                }
+                catch(Exception e)
+                {
+                    loader.log(LogLevel.Error, $"Error during multi-scene scan: {e.Message}");
+                    gotRoots = false; // 에러 발생 시 폴백 로직을 타도록 설정
                 }
             }
-            bGetting_GOS = false;
-        }
 
-        static void SwitchToRendererOnlyMode()
-        {
-            GOS.Clear();
+            if (!gotRoots)
+            {
+                loader.log(LogLevel.Debug, "Falling back to old root object finding method.");
+                Transform[] trs;
+#if interop
+                var array = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Transform>());
+                trs = array.Select(x => x.Cast<Transform>()).ToArray();
+#else
+                trs = UnityEngine.Object.FindObjectsOfType<Transform>();
+#endif
+                foreach (Transform xform in trs)
+                {
+                    if (xform.parent == null)
+                        GOS.Add(xform.gameObject);
+                }
+            }
+
+            lastCheckedSameCount = (lastCheckedCount == GOS.Count) ? lastCheckedSameCount + 1 : 0;
+            lastCheckedCount = GOS.Count;
+
             GOS_count = 0;
-            RendererOnlyCheckMode.Value = true;
+            next_check = DateTime.Now + tsCheckInterval;
+            
+            bGetting_GOS = false;
         }
 
         static void Decensor_GameObject(GameObject go)
@@ -1123,14 +904,31 @@ namespace SW_Decensor
             // Image 처리
             try
             {
-                UnityEngine.UI.Image[] images = go.GetComponentsInChildren<UnityEngine.UI.Image>(false);
-                if (images != null)
+#if interop
+                if (Il2Cpp_UI_Image_Type != null)
                 {
-                    foreach (UnityEngine.UI.Image image in images)
+                    var images = go.GetComponentsInChildren(Il2Cpp_UI_Image_Type, false);
+                    if (images != null)
                     {
-                        Decensor_image(image);
+                        foreach (Component image in images)
+                        {
+                            Decensor_image(image);
+                        }
                     }
                 }
+#else
+                if (UI_Image_Type != null)
+                {
+                    Component[] images = go.GetComponentsInChildren(UI_Image_Type, false);
+                    if (images != null)
+                    {
+                        foreach (Component image in images)
+                        {
+                            Decensor_image(image);
+                        }
+                    }
+                }
+#endif
             }
             catch (MissingMethodException) { }
         }
@@ -1145,7 +943,7 @@ namespace SW_Decensor
                 bool bSharedMaterials = renderer.sharedMaterials != null;
                 Material[]? mats = (bSharedMaterials ? renderer.sharedMaterials : renderer.materials);
                 bool bNotModToRemove = false;
-                
+
                 string type = renderer.GetType().Name;
                 //if ((mats.Length > 1 && type != "MeshRenderer")
                 //    || (mats.Length == 2 && type == "MeshRenderer"))
@@ -1155,7 +953,7 @@ namespace SW_Decensor
                 // Materials가 두개 이상이면 지워도 되는 것으로 간주.
                 if (mats?.Length > 1) bNotModToRemove = true;
 
-                List <Material> mats_added = new List<Material>();
+                List<Material> mats_added = new List<Material>();
                 List<int> mats_remove_index = new List<int>();
                 //foreach (Material mat in (bSharedMaterials ? renderer.sharedMaterials : renderer.materials))
                 if (mats != null)
@@ -1179,7 +977,7 @@ namespace SW_Decensor
                             //    mats_added.Add(mats[i]);
                             //}
                             //else
-                                mats_remove_index.Add(i);
+                            mats_remove_index.Add(i);
                         }
                         else
                             mats_added.Add(mats[i]);
@@ -1249,13 +1047,19 @@ namespace SW_Decensor
             return ret;
         }
 
-        static void Decensor_image(UnityEngine.UI.Image image)
+        static void Decensor_image(Component image)
         {
             //loader.log(LogLevel.Info, $"  r {renderer.name} {renderer.materials.Count()} {foundR}");
             try
             {
-                if (Decensor_material(image.material))
-                    image.enabled = false;
+                if (UI_Image_material_Prop != null && UI_Image_enabled_Prop != null)
+                {
+                    Material mat = (Material)UI_Image_material_Prop.GetValue(image, null);
+                    if (Decensor_material(mat))
+                    {
+                        UI_Image_enabled_Prop.SetValue(image, false, null);
+                    }
+                }
             }
             catch (NullReferenceException) { }
             catch (Exception) { }
@@ -1280,6 +1084,10 @@ namespace SW_Decensor
 
                     if (foundM == string.Empty && foundS == string.Empty || bForceCheckShader)
                     {
+                        // shader 이름이 RemoveKeyWords에 있다면 일단 삭제하는 방향으로.
+                        if (foundS != string.Empty)
+                            NeedDeleted = true;
+
                         foundM = DecensorTools.MatchKeywords(mat_name);
                         foundS = DecensorTools.MatchKeywords(shader_name);
 
@@ -1299,7 +1107,7 @@ namespace SW_Decensor
                         // NeedDeleted = true 이라도 삭제처리가 안 되는 경우가 있음.
                         if (foundM != string.Empty || foundS != string.Empty || bForceCheckShader)
                         {
-                            loader.log(LogLevel.Info, $"      found  {mat_name} {shader_name} {foundM!=string.Empty} {foundS != string.Empty} NeedDeleted {NeedDeleted} index {GOS_count} {renderers_index}");
+                            loader.log(LogLevel.Info, $"      found  {mat_name} {shader_name} {foundM != string.Empty} {foundS != string.Empty} NeedDeleted {NeedDeleted} index {GOS_count} {renderers_index}");
 
                             // shader replace 를 참조. 있다면 대체
                             if (!shader_replace.ContainsKey(shader_name))
@@ -1320,7 +1128,7 @@ namespace SW_Decensor
                                 mat.shader = Shader.Find(shader_replace[shader_name]);
                                 NeedDeleted = false;    // replace 되었으니 삭제는 안 하는 것으로.
                             }
-                            
+
                             // property 이름과 값이 정해져 있어야 함.
                             if (maximumLOD.Value != DecensorTools.default_MaximumLOD && mat.shader != null)
                             {
@@ -1452,7 +1260,7 @@ namespace SW_Decensor
                                     }
                                 }
                             }
-                           
+
                         }
                     }
                     else
@@ -1479,131 +1287,19 @@ namespace SW_Decensor
             }
             return NeedDeleted;
         }
-
-#if USE_SETVALUE_HOOK
-        [HarmonyPatch(typeof(Material), "SetFloat", new Type[] { typeof(string), typeof(float) })]
-        public class Material_SetFloat_string
-        {
-            [HarmonyPrefix]
-            public static void Prefix(Material __instance, string name, ref float value)
-            {
-                //loader.log(LogLevel.Info, $"  Material {__instance.name} {name} {value} {bIsForceSetValue}");
-                if (!bIsForceSetValue
-                    && PropertiesFloat.ContainsKey(name)
-                    && (__instance != null && __instance.shader != null
-                        && (DecensorTools.MatchKeywords(__instance.name) != string.Empty
-                        || DecensorTools.MatchKeywords(__instance.shader.name) != string.Empty)
-                    )
-                )
-                {
-                    //loader.log(LogLevel.Info, $"  Material {__instance.name} {name} {value} {bIsForceSetValue}");
-                    value = PropertiesFloat[name];
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Material), "SetFloat", new Type[] { typeof(int), typeof(float) })]
-        public class Material_SetFloat_int
-        {
-            [HarmonyPrefix]
-            public static void Prefix(Material __instance, int nameID, ref float value)
-            {
-                if (GetPropertyName != null)
-                {
-                    string name = (string)GetPropertyName.Invoke(__instance.shader, new object[] { nameID });
-                    //loader.log(LogLevel.Info, $"  Material {__instance.name} {name} {value} {bIsForceSetValue}");
-
-                    if (!bIsForceSetValue
-                        && PropertiesFloat.ContainsKey(name)
-                        && (__instance != null && __instance.shader != null
-                            && (DecensorTools.MatchKeywords(__instance.name) != string.Empty
-                            || DecensorTools.MatchKeywords(__instance.shader.name) != string.Empty)
-                        )
-                    )
-                    {
-                        //loader.log(LogLevel.Info, $"  Material {__instance.name} {nameID} {value} {bIsForceSetValue}");
-                        value = PropertiesFloat[name];
-                    }
-                }
-            }
-        }
-        [HarmonyPatch(typeof(Material), "SetVector", new Type[] { typeof(int), typeof(Vector4) })]
-        public class Material_SetVector_int
-        {
-            [HarmonyPrefix]
-            public static void Prefix(Material __instance, int nameID, ref Vector4 value)
-            {
-                if (GetPropertyName != null)
-                {
-                    string name = (string)GetPropertyName.Invoke(__instance.shader, new object[] { nameID });
-
-                    if (!bIsForceSetValue
-                        && PropertiesFloat.ContainsKey(name)
-                        && (__instance != null && __instance.shader != null
-                            && (DecensorTools.MatchKeywords(__instance.name) != string.Empty
-                            || DecensorTools.MatchKeywords(__instance.shader.name) != string.Empty)
-                        )
-                    )
-                    {
-                        //loader.log(LogLevel.Info, $"  Material {__instance.name} {nameID} {value} {bIsForceSetValue}");
-                        value = PropertiesVector[name];
-                    }
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Material), "SetVector", new Type[] { typeof(string), typeof(Vector4) })]
-        public class Material_SetVector_string
-        {
-            [HarmonyPrefix]
-            public static bool Prefix(Material __instance, string name, ref Vector4 value)
-            {
-                __instance.SetVector(Shader.PropertyToID(name), value);
-                return false;
-            }
-        }
-#endif
-
-        //[HarmonyPatch(typeof(GameObject), "SetActive", new Type[] { typeof(bool) })]
-        //public class GameObject_SetActive
-        //{
-        //    [HarmonyPostfix]
-        //    public static void Postfix(GameObject __instance, bool value)
-        //    {
-        //        //loader.log(LogLevel.Info, $"  GameObject {__instance.name} {value}");
-        //        if (value)
-        //        {
-        //            Decensor_GameObject(__instance);
-        //        }
-        //    }
-        //}
-
     }
 }
+
 public static class StringVector4Extensions
 {
     public static Vector4 ToVector4(this string str, params string[] delimiters)
     {
-        if (str == null) throw new ArgumentNullException("string is null");
-        if (string.IsNullOrEmpty(str)) throw new FormatException("string is empty");
-        if (string.IsNullOrWhiteSpace(str)) throw new FormatException("string is just white space");
+        if (string.IsNullOrEmpty(str)) throw new ArgumentNullException("str");
+        if (delimiters == null || delimiters.Length == 0) throw new ArgumentNullException("delimiters");
 
-        if (delimiters == null) throw new ArgumentNullException("delimiters are null");
-        if (delimiters.Length <= 0) throw new InvalidOperationException("missing delimiters");
+        var parts = str.Split(delimiters, System.StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 4) throw new System.FormatException("Input string must contain four numbers.");
 
-        var rslt = str
-        .Split(delimiters, StringSplitOptions.RemoveEmptyEntries)
-        .Select(float.Parse)
-        .ToArray()
-        ;
-
-        if (rslt.Length != 4)
-            throw new FormatException("The input string does not follow" +
-                                        "the required format for the string." +
-                                        "There has to be four floats inside" +
-                                        "the string delimited by one of the" +
-                                        "requested delimiters. input string: " +
-                                        str);
-        return new Vector4(rslt[0], rslt[1], rslt[2], rslt[3]);
+        return new Vector4(float.Parse(parts[0]), float.Parse(parts[1]), float.Parse(parts[2]), float.Parse(parts[3]));
     }
 }

@@ -1,20 +1,6 @@
-﻿using BepInEx.Logging;
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using System.Threading;
 using UnityEngine;
-using UnityEngine.UI;
-
-
-#if interop
-using Il2CppInterop.Runtime;
-    using loader = SW_Decensor_il2cpp.loader;
-#endif
-#if mono
-using loader = SW_Decensor_BE5.loader;
-#endif
 
 
 namespace Common
@@ -22,7 +8,7 @@ namespace Common
     internal static class Metadata
     {
         public const string AUTHOR = "kumarin";
-        public const string VERSION = "0.7.3.1";
+        public const string VERSION = "0.7.4.0";
 
 #if interop
         public const string MODNAME = "SW_Decensor_il2cpp";

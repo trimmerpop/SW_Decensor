@@ -4,6 +4,7 @@
   <PropertyGroup>
     <!-- existing property declarations are here -->
     <UseCommonOutputDirectory>true</UseCommonOutputDirectory>
+    <TargetFrameworkProfile />
   </PropertyGroup>
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
@@ -13,7 +14,7 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>SW_Decensor_BE6</RootNamespace>
     <AssemblyName>SW_Decensor_BE6</AssemblyName>
-    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v3.5</TargetFrameworkVersion>
     <LangVersion>8.0</LangVersion>
     <Nullable>enable</Nullable>
     <FileAlignment>512</FileAlignment>
@@ -24,7 +25,7 @@
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
     <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>TRACE;DEBUG;mono</DefineConstants>
+    <DefineConstants>TRACE;DEBUG;mono, bie6mono</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
@@ -32,7 +33,7 @@
     <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE;mono</DefineConstants>
+    <DefineConstants>TRACE;mono, bie6mono</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
@@ -43,7 +44,6 @@
     <Compile Include="..\SW_Decensor\SW_Decensor.cs">
       <Link>SW_Decensor.cs</Link>
     </Compile>
-    <Compile Include="SW_Decensor_BE6.cs" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="0Harmony">
