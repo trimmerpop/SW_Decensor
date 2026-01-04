@@ -208,7 +208,7 @@ namespace SW_Decensor
         static MethodInfo? getRootGameObjectsMethod = null;
         static PropertyInfo? isLoadedProperty = null;
         static PropertyInfo? gameObjectSceneProperty = null;
-        private static GameObject? ddolAnchor = null;
+        private static GameObject? ddolAnchor = null; // for DontDestroyOnLoad
 
         static System.Type? UI_Image_Type = null;
 #if interop
