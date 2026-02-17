@@ -26,6 +26,7 @@ using MissingMethodException = System.MissingMethodException;
 using ArgumentOutOfRangeException = System.ArgumentOutOfRangeException;
 using ArgumentNullException = System.ArgumentNullException;
 using NullReferenceException = System.NullReferenceException;
+using Convert = System.Convert;
 
 #if bie6mono
 using BepInEx.Unity.Mono;
@@ -620,16 +621,12 @@ namespace SW_Decensor
                 var scene = GetActiveScene.Invoke(null, null);
                 if (scene != null)
                 {
-                    var handleProp = scene.GetType().GetProperty("handle");
-                    if (handleProp != null)
+                    int sceneHandle = scene.GetHashCode();
+                    if (lastScene != sceneHandle)
                     {
-                        int sceneHandle = (int)handleProp.GetValue(scene, null);
-                        if (lastScene != sceneHandle)
-                        {
-                            lastScene = sceneHandle;
-                            GOS.Clear();
-                            scene_loop_count = 0;
-                        }
+                        lastScene = sceneHandle;
+                        GOS.Clear();
+                        scene_loop_count = 0;
                     }
                 }
             }
@@ -703,7 +700,7 @@ namespace SW_Decensor
             {
                 try
                 {
-                    int sceneCount = (int)sceneCountProperty.GetValue(null, null);
+                    int sceneCount = Convert.ToInt32(sceneCountProperty.GetValue(null, null));
                     for (int i = 0; i < sceneCount; i++)
                     {
                         object scene = getSceneAtMethod.Invoke(null, new object[] { i });
