@@ -8,7 +8,7 @@ namespace Common
     internal static class Metadata
     {
         public const string AUTHOR = "kumarin";
-        public const string VERSION = "0.7.4.3";
+        public const string VERSION = "0.7.4.4";
 
 #if interop
         public const string MODNAME = "SW_Decensor_il2cpp";

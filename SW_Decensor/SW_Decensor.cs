@@ -197,6 +197,11 @@ namespace SW_Decensor
         static HashSet<int> knownGOS = new HashSet<int>();
         // root GameObject 수집용 재사용 버퍼 (사이클마다 List 를 새로 할당하지 않도록)
         static List<GameObject> rootsBuffer = new List<GameObject>();
+        // 이번 사이클에서 처리한 GameObject 목록. 이미 처리한 부모에 자식이 새로 생겼는지 감시하기 위한 것.
+        // (Get_GOS() 로 사이클이 시작될 때 비운다)
+        static List<GameObject> processedGOS = new List<GameObject>();
+        // 처리 시점의 childCount. 다음 Merge_GOS() 주기에 값이 달라졌으면 새 자식이 생긴 것으로 본다.
+        static Dictionary<int, int> childCountCache = new Dictionary<int, int>();
         static Dictionary<string, string> shader_replace = new Dictionary<string, string>();
         static Dictionary<int, int> layer_replace = new Dictionary<int, int>();
         static Dictionary<int, int> layer_replace_count = new Dictionary<int, int>();
@@ -669,6 +674,8 @@ namespace SW_Decensor
                     {
                         Add_GOS_Child(go);
                         Decensor_GameObject(go);
+                        // 자식이 나중에 새로 생기는 경우를 감시하기 위해 처리 시점의 childCount 를 남긴다.
+                        Track_GOS_ChildCount(go);
                         GOS_count++;
                     }
                 } while (GOS.Count > 0 && DateTime.Now < LoopLimit);
@@ -815,6 +822,8 @@ namespace SW_Decensor
 
             GOS.Clear();
             knownGOS.Clear();
+            processedGOS.Clear();
+            childCountCache.Clear();
             foreach (GameObject root in rootsBuffer)
             {
                 GOS_Add(root);
@@ -834,6 +843,9 @@ namespace SW_Decensor
         // GOS_count / lastChecked* / scene_loop_count 는 전체 재수집(Get_GOS) 에서만 갱신한다.
         void Merge_GOS()
         {
+            // 이미 처리한 부모에 자식이 새로 생겼는지 먼저 반영한다. (신규 자식은 큐에 투입)
+            Detect_NewChildren();
+
             rootsBuffer.Clear();
             Collect_GOS_Roots(rootsBuffer);
 
@@ -847,6 +859,54 @@ namespace SW_Decensor
 
             if (GOS.Count > before)
                 loader.log(LogLevel.Debug, $"  merged new root GameObjects: {GOS.Count - before}");
+        }
+
+        // 처리한 GameObject 를 기록하고, 처리 시점의 childCount 를 저장한다.
+        static void Track_GOS_ChildCount(GameObject go)
+        {
+            int id = go.GetInstanceID();
+            processedGOS.Add(go);
+            childCountCache[id] = go.transform.childCount;
+        }
+
+        // 이미 처리한 GameObject 의 childCount 변화만 확인해서, 새로 생긴 자식만 큐에 넣는다.
+        // 부모를 다시 처리하지 않으므로 Decensor_GameObject() 를 중복 실행하지 않는다.
+        static void Detect_NewChildren()
+        {
+            for (int i = processedGOS.Count - 1; i >= 0; i--)
+            {
+                GameObject parent = processedGOS[i];
+                if (parent == null)
+                {
+                    // 파괴된 객체는 목록에서 제거
+                    processedGOS.RemoveAt(i);
+                    continue;
+                }
+
+                int id = parent.GetInstanceID();
+                Transform tr = parent.transform;
+                int childCount = tr.childCount;
+
+                int known;
+                if (!childCountCache.TryGetValue(id, out known))
+                {
+                    childCountCache[id] = childCount;
+                    continue;
+                }
+                if (known == childCount)
+                    continue;
+
+                childCountCache[id] = childCount;
+
+                // 이미 큐에 넣은 자식은 GOS_Add() 가 걸러내므로, 실제로는 새 자식만 투입된다.
+                // (자식이 줄어든 경우에는 전부 걸러져 아무 일도 하지 않는다)
+                for (int c = 0; c < tr.childCount; c++)
+                {
+                    Transform child = tr.GetChild(c);
+                    if (child != null)
+                        GOS_Add(child.gameObject);
+                }
+            }
         }
 
         static void Decensor_GameObject(GameObject go)
