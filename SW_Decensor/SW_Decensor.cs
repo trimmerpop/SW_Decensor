@@ -603,6 +603,7 @@ namespace SW_Decensor
             }
         }
 
+#if !interop
         IEnumerator DoMain_Iemu()
         {
             while (true)
@@ -611,6 +612,7 @@ namespace SW_Decensor
                 DoMain();
             }
         }
+#endif
 
         void DoMain()
         {

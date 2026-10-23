@@ -44,9 +44,6 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Analyzer Include="..\Lib\BE5 mono\UnityEngine.dll" />
-  </ItemGroup>
-  <ItemGroup>
     <Reference Include="0Harmony">
       <HintPath>..\Lib\BE5 mono\0Harmony.dll</HintPath>
     </Reference>
