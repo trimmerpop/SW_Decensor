@@ -191,6 +191,12 @@ namespace SW_Decensor
         static TimeSpan tsLoopTimeLimit_level_max = TimeSpan.FromMilliseconds(50);
         static TimeSpan tsCheckInterval;
         static DateTime? next_check = null;
+        // 이번 사이클에서 GOS 큐에 넣은 GameObject 의 instanceID.
+        // Merge_GOS() 로 같은 객체를 중복 투입하지 않기 위한 추적용 집합.
+        // (Il2CppInterop 은 같은 native 객체라도 호출마다 wrapper 가 달라질 수 있어 참조 비교 대신 instanceID 사용)
+        static HashSet<int> knownGOS = new HashSet<int>();
+        // root GameObject 수집용 재사용 버퍼 (사이클마다 List 를 새로 할당하지 않도록)
+        static List<GameObject> rootsBuffer = new List<GameObject>();
         static Dictionary<string, string> shader_replace = new Dictionary<string, string>();
         static Dictionary<int, int> layer_replace = new Dictionary<int, int>();
         static Dictionary<int, int> layer_replace_count = new Dictionary<int, int>();
@@ -628,7 +634,10 @@ namespace SW_Decensor
                     {
                         lastScene = sceneHandle;
                         GOS.Clear();
+                        knownGOS.Clear();
                         scene_loop_count = 0;
+                        // 씬 전환 직후에는 tsCheckInterval(500ms) 만큼 기다리지 않고 바로 재수집한다.
+                        next_check = null;
                     }
                 }
             }
@@ -641,8 +650,15 @@ namespace SW_Decensor
 
         void ProcessGameObjects()
         {
+            bool bNeedRefresh = (next_check == null || next_check < DateTime.Now);
+
             if (next_check != null && GOS.Count > 0)
             {
+                // 큐를 소진하는 동안에도 신규 root 는 다음 재수집을 기다리지 않고 큐에 병합한다.
+                // (Get_GOS() 는 큐를 비우고 전체를 다시 모으므로 이 경로에서는 쓰지 않는다)
+                if (bNeedRefresh)
+                    Merge_GOS();
+
                 DateTime LoopLimit = DateTime.Now + tsLoopTimeLimit;
                 do
                 {
@@ -657,7 +673,7 @@ namespace SW_Decensor
                     }
                 } while (GOS.Count > 0 && DateTime.Now < LoopLimit);
             }
-            else if (next_check == null || next_check < DateTime.Now)
+            else if (bNeedRefresh)
             {
                 scene_loop_count = System.Math.Min(scene_loop_count + 1, 2);
                 Get_GOS();
@@ -687,15 +703,15 @@ namespace SW_Decensor
         {
             for (int i = 0; i < go.transform.childCount; i++)
             {
-                GOS.Add(go.transform.GetChild(i).gameObject);
+                // 이미 이번 사이클에 큐에 넣은 객체는 중복 투입하지 않는다.
+                GOS_Add(go.transform.GetChild(i).gameObject);
             }
         }
 
-        void Get_GOS()
+        // 현재 로드된 모든 씬 + DontDestroyOnLoad 의 root GameObject 를 roots 에 모은다.
+        // Get_GOS()(사이클 시작 시 전체 재수집) 와 Merge_GOS()(사이클 도중 신규 root 병합) 가 공유한다.
+        void Collect_GOS_Roots(List<GameObject> roots)
         {
-            bGetting_GOS = true;
-            
-            GOS.Clear();
             bool gotRoots = false;
 
             if (sceneCountProperty != null && getSceneAtMethod != null && getRootGameObjectsMethod != null && isLoadedProperty != null)
@@ -717,14 +733,14 @@ namespace SW_Decensor
 #if interop
                         if (sceneResult is Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<GameObject> il2cppArray)
                         {
-                            GOS.AddRange(il2cppArray);
+                            roots.AddRange(il2cppArray);
                         }
                         else if (sceneResult is GameObject[] goArray)
                         {
-                            GOS.AddRange(goArray);
+                            roots.AddRange(goArray);
                         }
 #else
-                        GOS.AddRange((GameObject[])sceneResult);
+                        roots.AddRange((GameObject[])sceneResult);
 #endif
                     }
 
@@ -739,24 +755,22 @@ namespace SW_Decensor
 #if interop
                                 if (ddolResult is Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<GameObject> il2cppArray)
                                 {
-                                    GOS.AddRange(il2cppArray);
+                                    roots.AddRange(il2cppArray);
                                 }
                                 else if (ddolResult is GameObject[] goArray)
                                 {
-                                    GOS.AddRange(goArray);
+                                    roots.AddRange(goArray);
                                 }
 #else
-                                GOS.AddRange((GameObject[])ddolResult);
+                                roots.AddRange((GameObject[])ddolResult);
 #endif
                             }
                         }
                     }
 
-                    GOS = GOS.Distinct().ToList();
-
                     gotRoots = true;
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
                     loader.log(LogLevel.Error, $"Error during multi-scene scan: {e.Message}");
                     gotRoots = false; // 에러 발생 시 폴백 로직을 타도록 설정
@@ -765,6 +779,8 @@ namespace SW_Decensor
 
             if (!gotRoots)
             {
+                // 중간에 실패했을 수 있으므로 이번에 모은 것은 버리고 기존 방식으로 다시 모은다.
+                roots.Clear();
                 loader.log(LogLevel.Debug, "Falling back to old root object finding method.");
                 Transform[] trs;
 #if interop
@@ -776,8 +792,32 @@ namespace SW_Decensor
                 foreach (Transform xform in trs)
                 {
                     if (xform.parent == null)
-                        GOS.Add(xform.gameObject);
+                        roots.Add(xform.gameObject);
                 }
+            }
+        }
+
+        // GOS 큐에 넣는다. 이미 이번 사이클에 넣은 객체는 건너뛴다.
+        // (예전의 GOS.Distinct() 를 instanceID 기반으로 대체)
+        static void GOS_Add(GameObject go)
+        {
+            if (go == null) return;
+            if (knownGOS.Add(go.GetInstanceID()))
+                GOS.Add(go);
+        }
+
+        void Get_GOS()
+        {
+            bGetting_GOS = true;
+
+            rootsBuffer.Clear();
+            Collect_GOS_Roots(rootsBuffer);
+
+            GOS.Clear();
+            knownGOS.Clear();
+            foreach (GameObject root in rootsBuffer)
+            {
+                GOS_Add(root);
             }
 
             lastCheckedSameCount = (lastCheckedCount == GOS.Count) ? lastCheckedSameCount + 1 : 0;
@@ -785,8 +825,28 @@ namespace SW_Decensor
 
             GOS_count = 0;
             next_check = DateTime.Now + tsCheckInterval;
-            
+
             bGetting_GOS = false;
+        }
+
+        // 큐를 비우지 않고 신규 root 만 골라 큐 끝에 덧붙인다.
+        // GOS 는 LIFO 로 꺼내므로 새로 붙인 root 가 먼저 처리된다.
+        // GOS_count / lastChecked* / scene_loop_count 는 전체 재수집(Get_GOS) 에서만 갱신한다.
+        void Merge_GOS()
+        {
+            rootsBuffer.Clear();
+            Collect_GOS_Roots(rootsBuffer);
+
+            int before = GOS.Count;
+            foreach (GameObject root in rootsBuffer)
+            {
+                GOS_Add(root);
+            }
+
+            next_check = DateTime.Now + tsCheckInterval;
+
+            if (GOS.Count > before)
+                loader.log(LogLevel.Debug, $"  merged new root GameObjects: {GOS.Count - before}");
         }
 
         static void Decensor_GameObject(GameObject go)
@@ -862,7 +922,9 @@ namespace SW_Decensor
                     else if (render_count == 1 && !bExistsSpine)
                     {
                         // renderer가 1개이고 material도 한개인 경우, shader name이 KeyWords에 걸리면 disable 처리
-                        Renderer[] rends = go.GetComponentsInChildren<Renderer>(false);
+                        // childCount == 0 인 leaf 이므로 GetComponents() 와 결과가 동일하다.
+                        // (interop 빌드에서는 Il2CppArrayBase<T> 가 반환되므로 var 로 받는다)
+                        var rends = go.GetComponents<Renderer>();
                         if (rends.Count() == 1)
                         {
                             bool bSharedMaterials = rends[0].sharedMaterials != null;
@@ -930,44 +992,56 @@ namespace SW_Decensor
             }
             //else
             //{
-            Renderer[] renderers = go.GetComponentsInChildren<Renderer>(false);
-            if (renderers != null)
+            // 자기 자신의 Renderer만 검사한다.
+            // 자식 GameObject는 Add_GOS_Child()로 GOS 큐에 들어가 각자 처리되므로 검사 범위는 그대로 유지되고,
+            // GetComponentsInChildren()으로 자손까지 끌어와 깊이만큼 중복 검사하던 비용만 사라진다.
+            // (기존 GetComponentsInChildren(includeInactive: false)와 동일한 범위를 유지하기 위해
+            //  비활성 GameObject는 건너뛴다. Renderer 자신의 activeInHierarchy 조건과 같다.)
+            if (go.activeInHierarchy)
             {
-                foreach (Renderer renderer in renderers)
+                var renderers = go.GetComponents<Renderer>();
+                if (renderers != null)
                 {
-                    //loader.log(LogLevel.Info, $"  r {renderer.name} {renderer.materials.Count()} {DecensorTools.MatchKeywords(renderer.name)}");
-                    Decensor_renderer(renderer, bExistsSpine);
+                    foreach (Renderer renderer in renderers)
+                    {
+                        //loader.log(LogLevel.Info, $"  r {renderer.name} {renderer.materials.Count()} {DecensorTools.MatchKeywords(renderer.name)}");
+                        Decensor_renderer(renderer, bExistsSpine);
+                    }
                 }
             }
 
             // Image 처리
+            // Renderer 와 같은 이유로 자기 자신의 컴포넌트만 검사한다. (자식은 GOS 큐에서 각자 처리)
             try
             {
+                if (go.activeInHierarchy)
+                {
 #if interop
-                if (Il2Cpp_UI_Image_Type != null)
-                {
-                    var images = go.GetComponentsInChildren(Il2Cpp_UI_Image_Type, false);
-                    if (images != null)
+                    if (Il2Cpp_UI_Image_Type != null)
                     {
-                        foreach (Component image in images)
+                        var images = go.GetComponents(Il2Cpp_UI_Image_Type);
+                        if (images != null)
                         {
-                            Decensor_image(image);
+                            foreach (Component image in images)
+                            {
+                                Decensor_image(image);
+                            }
                         }
                     }
-                }
 #else
-                if (UI_Image_Type != null)
-                {
-                    Component[] images = go.GetComponentsInChildren(UI_Image_Type, false);
-                    if (images != null)
+                    if (UI_Image_Type != null)
                     {
-                        foreach (Component image in images)
+                        Component[] images = go.GetComponents(UI_Image_Type);
+                        if (images != null)
                         {
-                            Decensor_image(image);
+                            foreach (Component image in images)
+                            {
+                                Decensor_image(image);
+                            }
                         }
                     }
-                }
 #endif
+                }
             }
             catch (MissingMethodException) { }
         }
