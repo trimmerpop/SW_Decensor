@@ -107,8 +107,17 @@ namespace SW_Decensor
             }
         }
 
-        public static loader Instance;
-        internal static ManualLogSource llog;
+        // BepInEx 가 생성한 로더 인스턴스. Load()/Awake() 에서 Init() 이 호출될 때 설정되므로
+        // 그 이전에는 null 이다.
+        // (public static 필드는 CA2211/CS8618 의 대상이므로 nullable backing field + 프로퍼티로 노출한다)
+        private static loader? _instance;
+        public static loader? Instance
+        {
+            get => _instance;
+            private set => _instance = value;
+        }
+        // Init() 에서 설정된다. 그 이전에는 null 이므로 호출부는 llog?.Log(...) 로 사용한다.
+        internal static ManualLogSource? llog;
 
         private void Init()
         {
@@ -136,8 +145,10 @@ namespace SW_Decensor
 
     public class SW_Decensor : MonoBehaviour
     {
-        internal static SW_Decensor Instance { get; private set; }
-        public static loader Loader { get; private set; }
+        // Setup() 에서 AddComponent 로 생성되며, 실패하면 null 이 될 수 있다.
+        internal static SW_Decensor? Instance { get; private set; }
+        // Init() 에서 설정된다.
+        public static loader? Loader { get; private set; }
 
         private static ConfigFile configFile { get; set; } = new ConfigFile(Path.Combine(Paths.ConfigPath, string.Format("{0}.ini", Common.Metadata.MODNAME)), false);
         private const string SectionName = "Config";
@@ -342,13 +353,13 @@ namespace SW_Decensor
             {
                 GetActiveScene = AccessTools.Method("UnityEngine.SceneManagement.SceneManager:GetActiveScene");
 
-                Type sceneManagerType = Type.GetType("UnityEngine.SceneManagement.SceneManager, UnityEngine.CoreModule");
+                Type? sceneManagerType = Type.GetType("UnityEngine.SceneManagement.SceneManager, UnityEngine.CoreModule");
                 if (sceneManagerType != null)
                 {
                     sceneCountProperty = sceneManagerType.GetProperty("sceneCount", BindingFlags.Public | BindingFlags.Static);
                     getSceneAtMethod = sceneManagerType.GetMethod("GetSceneAt", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(int) }, null);
 
-                    Type sceneType = Type.GetType("UnityEngine.SceneManagement.Scene, UnityEngine.CoreModule");
+                    Type? sceneType = Type.GetType("UnityEngine.SceneManagement.Scene, UnityEngine.CoreModule");
                     if (sceneType != null)
                     {
                         isLoadedProperty = sceneType.GetProperty("isLoaded", BindingFlags.Public | BindingFlags.Instance);
@@ -407,14 +418,14 @@ namespace SW_Decensor
             try
             {
                 // 'System.Threading.Tasks.Task' 타입이 현재 런타임에 존재하는지 확인
-                Type taskType = Type.GetType("System.Threading.Tasks.Task");
+                Type? taskType = Type.GetType("System.Threading.Tasks.Task");
                 if (taskType == null)
                 {
                     return false;
                 }
 
                 // Task.Run(Action) 메서드 정보 가져오기
-                MethodInfo runMethod = taskType.GetMethod("Run", new[] { typeof(Action) });
+                MethodInfo? runMethod = taskType.GetMethod("Run", new[] { typeof(Action) });
                 if (runMethod == null)
                 {
                     return false;
@@ -728,13 +739,20 @@ namespace SW_Decensor
                     int sceneCount = Convert.ToInt32(sceneCountProperty.GetValue(null, null));
                     for (int i = 0; i < sceneCount; i++)
                     {
-                        object scene = getSceneAtMethod.Invoke(null, new object[] { i });
-                        if (scene == null || !(bool)isLoadedProperty.GetValue(scene, null))
+                        object? scene = getSceneAtMethod.Invoke(null, new object[] { i });
+                        if (scene == null)
                         {
                             continue;
                         }
 
-                        object sceneResult = getRootGameObjectsMethod.Invoke(scene, null);
+                        // isLoaded 는 bool 프로퍼티. 값을 얻을 수 없으면 이 씬은 건너뛴다.
+                        object? isLoadedValue = isLoadedProperty.GetValue(scene, null);
+                        if (!(isLoadedValue is bool bSceneLoaded) || !bSceneLoaded)
+                        {
+                            continue;
+                        }
+
+                        object? sceneResult = getRootGameObjectsMethod.Invoke(scene, null);
                         if (sceneResult == null) continue;
 
 #if interop
@@ -756,7 +774,7 @@ namespace SW_Decensor
                         var ddolScene = gameObjectSceneProperty.GetValue(ddolAnchor, null);
                         if (ddolScene != null)
                         {
-                            object ddolResult = getRootGameObjectsMethod.Invoke(ddolScene, null);
+                            object? ddolResult = getRootGameObjectsMethod.Invoke(ddolScene, null);
                             if (ddolResult != null)
                             {
 #if interop
@@ -1227,7 +1245,7 @@ namespace SW_Decensor
             {
                 if (UI_Image_material_Prop != null && UI_Image_enabled_Prop != null)
                 {
-                    Material mat = (Material)UI_Image_material_Prop.GetValue(image, null);
+                    Material? mat = UI_Image_material_Prop.GetValue(image, null) as Material;
                     if (Decensor_material(mat))
                     {
                         UI_Image_enabled_Prop.SetValue(image, false, null);
@@ -1238,7 +1256,7 @@ namespace SW_Decensor
             catch (Exception) { }
         }
 
-        static bool Decensor_material(Material mat, bool bCanbeDeleted = false, bool bMeshRenderer = false, bool bForceCheckShader = false)
+        static bool Decensor_material(Material? mat, bool bCanbeDeleted = false, bool bMeshRenderer = false, bool bForceCheckShader = false)
         {
             bool NeedDeleted = false;
             string foundM = string.Empty;
@@ -1326,7 +1344,7 @@ namespace SW_Decensor
                                                     idx = Shader.PropertyToID(item.Key);
                                                 if (idx != null)
                                                 {
-                                                    ShaderPropertyType type = (ShaderPropertyType)GetPropertyType?.Invoke(mat.shader, new object[] { idx });
+                                                    ShaderPropertyType? type = GetPropertyType?.Invoke(mat.shader, new object[] { idx }) as ShaderPropertyType?;
                                                     //loader.log(LogLevel.Warning, $"  FindPropertyIndex {mat_name} {item.Key} {idx} {type}");
                                                     if (type != ShaderPropertyType.Float
                                                         && type != ShaderPropertyType.Range)
@@ -1406,7 +1424,7 @@ namespace SW_Decensor
                                                     idx = Shader.PropertyToID(item.Key);
                                                 if (idx != null)
                                                 {
-                                                    ShaderPropertyType type = (ShaderPropertyType)GetPropertyType?.Invoke(mat.shader, new object[] { idx });
+                                                    ShaderPropertyType? type = GetPropertyType?.Invoke(mat.shader, new object[] { idx }) as ShaderPropertyType?;
                                                     if (type != ShaderPropertyType.Vector && type != ShaderPropertyType.Color)
                                                     {
                                                         bDoSet = false;
