@@ -361,3 +361,15 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# 참조 어셈블리(Lib) 중 어떤 .csproj의 HintPath에서도 사용하지 않는 로컬 백업/버전별 사본.
+# 빌드에 필요한 DLL은 Lib/BE5 mono, Lib/BE6 mono, Lib/BE6 imterop 바로 아래의 것들뿐이므로
+# 아래 하위 폴더는 커밋하지 않는다. (필요해지면 해당 csproj에 HintPath를 추가하고 규칙을 해제)
+/Lib/BE5 mono/backup/
+/Lib/BE5 mono/bak*/
+/Lib/BE5 mono/Unity */
+/Lib/BE6 imterop/bak/
+/Lib/BE6 imterop/20*/
+
+# VS Code 개인 워크스페이스 설정 (dotnet.preferCSharpExtension 등 로컬 선호도)
+/.vscode/

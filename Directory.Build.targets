@@ -1,0 +1,38 @@
+<Project>
+
+  <!--
+    .NET Framework 3.5(v3.5) 타깃 보정.
+
+    Visual Studio의 MSBuild(.NET Framework 기반)는 레거시 경로
+    "%ProgramFiles(x86)%\Reference Assemblies\Microsoft\Framework\v3.5" 에서 참조 어셈블리를 찾지만,
+    .NET SDK의 MSBuild(dotnet CLI / VS Code C# 확장의 언어 서버)는 ".NETFramework\v3.5" 레이아웃만
+    찾기 때문에 MSB3644 오류가 발생하고, 언어 서버에는 "unresolved dependencies" 경고가 표시된다.
+
+    아래에서는 두 툴체인 모두 같은 경로를 사용하도록 v3.5 참조/런타임 경로를 직접 지정한다.
+    (경로 순서는 Visual Studio의 GetReferenceAssemblyPaths 결과와 동일)
+  -->
+  <PropertyGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(TargetFrameworkVersion)' == 'v3.5'">
+    <_Net35ReferenceAssemblyDirectory>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\v3.5\</_Net35ReferenceAssemblyDirectory>
+    <_Net35RuntimeDirectory>$(WinDir)\Microsoft.NET\Framework\v3.5\</_Net35RuntimeDirectory>
+    <_Net30ReferenceAssemblyDirectory>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\v3.0\</_Net30ReferenceAssemblyDirectory>
+    <_Net30RuntimeDirectory>$(WinDir)\Microsoft.NET\Framework\v3.0\</_Net30RuntimeDirectory>
+    <_Net20RuntimeDirectory>$(WinDir)\Microsoft.NET\Framework\v2.0.50727\</_Net20RuntimeDirectory>
+  </PropertyGroup>
+
+  <!-- .NET Framework 3.5 런타임이 설치된 경우에만 적용 (미설치 환경에서는 기존 동작 유지) -->
+  <PropertyGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(TargetFrameworkVersion)' == 'v3.5' and Exists('$(_Net20RuntimeDirectory)mscorlib.dll') and Exists('$(_Net35ReferenceAssemblyDirectory)')">
+    <!-- GetReferenceAssemblyPaths 태스크가 v3.5를 찾지 못해 실패하지 않도록 결과 값을 미리 채운다. -->
+    <BypassFrameworkInstallChecks>true</BypassFrameworkInstallChecks>
+    <_TargetFrameworkDirectories>$(_Net35ReferenceAssemblyDirectory);$(_Net35RuntimeDirectory);$(_Net30ReferenceAssemblyDirectory);$(_Net30RuntimeDirectory);$(_Net20RuntimeDirectory)</_TargetFrameworkDirectories>
+    <_FullFrameworkReferenceAssemblyPaths>$(_TargetFrameworkDirectories)</_FullFrameworkReferenceAssemblyPaths>
+    <TargetFrameworkDirectory>$(_TargetFrameworkDirectories)</TargetFrameworkDirectory>
+    <!-- dotnet MSBuild에서는 csc가 기본 경로에서 mscorlib를 찾지 못하므로 직접 참조한다. -->
+    <EnableFrameworkPathOverride>false</EnableFrameworkPathOverride>
+    <NoStdLib>true</NoStdLib>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(TargetFrameworkVersion)' == 'v3.5' and '$(NoStdLib)' == 'true'">
+    <Reference Include="mscorlib" Pack="false" />
+  </ItemGroup>
+
+</Project>
