@@ -140,6 +140,13 @@ namespace SW_Decensor
         {
             Init();
         }
+
+        // Unity 6000 + BepInEx 5 조합에서는 플러그인 Awake() 안에서 GameObject/컴포넌트를 만들면
+        // 엔진이 네이티브 크래시한다. 컴포넌트 생성은 엔진 초기화가 끝난 첫 Update() 로 미룬다.
+        private void Update()
+        {
+            SW_Decensor.TryDeferredSetup();
+        }
 #endif
     }
 
@@ -251,6 +258,22 @@ namespace SW_Decensor
         static int lastCheckedCount = 0;
         static int lastCheckedSameCount = 0;
 
+        static bool bSetupPending = false;
+
+        /// <summary>
+        /// 플러그인 Awake() 시점에는 BepInEx 가 네이티브 AddComponent 를 호출하는 중이라
+        /// 그 안에서 다시 GameObject/컴포넌트를 만들면 Unity 6000 에서 네이티브 크래시가 발생한다.
+        /// 따라서 엔진 초기화가 끝난 첫 Update() 로 Setup() 을 미룬다.
+        /// (il2cpp 는 Load() 시점에 엔진이 초기화되어 있으므로 즉시 실행한다)
+        /// </summary>
+        internal static void TryDeferredSetup()
+        {
+            if (!bSetupPending)
+                return;
+            bSetupPending = false;
+            Setup();
+        }
+
         internal static void Setup()
         {
 #if interop
@@ -268,7 +291,11 @@ namespace SW_Decensor
             if (Loader != null)
                 throw new Exception(string.Format("{0} is already loaded.", Metadata.MODNAME));
             Loader = loader;
+#if interop
             Setup();
+#else
+            bSetupPending = true;
+#endif
             tsLoopTimeLimit = TimeSpan.FromMilliseconds(1);
             tsCheckInterval = TimeSpan.FromMilliseconds(500);
         }
@@ -1256,6 +1283,48 @@ namespace SW_Decensor
             catch (Exception) { }
         }
 
+        /// <summary>
+        /// Shader.GetPropertyType(int) 이 돌려주는 UnityEngine.Rendering.ShaderPropertyType 을 정수 값으로 변환한다.
+        ///
+        /// 이 클래스의 ShaderPropertyType 은 이름만 같은 별개의 타입이라서 캐스팅으로 값을 얻을 수 없다.
+        /// Mono 런타임은 명시적 캐스팅(unbox.any)만 enum 의 element_class(=기저 정수형)를 비교해 통과시키고,
+        /// isinst 를 사용하는 `as` 연산자는 타입이 다르면 조용히 null 을 돌려준다.
+        /// (반사 결과를 null-safe 로 정리하면서 (ShaderPropertyType) 캐스팅이 `as ShaderPropertyType?` 로
+        ///  바뀐 뒤로 ShaderPropertiesFloat/ShaderPropertiesVector 가 전혀 적용되지 않게 되었다)
+        /// 그래서 이후 코드는 타입 동일성이 아니라 정수 값으로만 비교한다.
+        /// </summary>
+        static bool TryGetShaderPropertyTypeValue(object? rawType, out int typeValue)
+        {
+            typeValue = -1;
+            if (rawType == null)
+                return false;
+
+            // 박싱된 enum (UnityEngine.Rendering.ShaderPropertyType, il2cpp wrapper 등)
+            // il2cpp 빌드에서는 Il2CppSystem.Enum 과 이름이 겹치므로 System.Enum 을 명시한다.
+            if (rawType is System.Enum enumValue)
+            {
+                typeValue = Convert.ToInt32(enumValue);
+                return true;
+            }
+
+            if (rawType is int intValue)
+            {
+                typeValue = intValue;
+                return true;
+            }
+
+            try
+            {
+                typeValue = Convert.ToInt32(rawType);
+                return true;
+            }
+            catch (Exception except)
+            {
+                loader.log(LogLevel.Debug, $"      ShaderPropertyType convert failed: {except.Message}");
+                return false;
+            }
+        }
+
         static bool Decensor_material(Material? mat, bool bCanbeDeleted = false, bool bMeshRenderer = false, bool bForceCheckShader = false)
         {
             bool NeedDeleted = false;
@@ -1290,6 +1359,7 @@ namespace SW_Decensor
                             if (bMeshRenderer)
                             {
                                 mat.renderQueue = 0;
+                                loader.log(LogLevel.Info, $"      {mat_name} {shader_name} renderQueue -> 0");
                             }
                             else
                                 NeedDeleted = true;
@@ -1344,10 +1414,13 @@ namespace SW_Decensor
                                                     idx = Shader.PropertyToID(item.Key);
                                                 if (idx != null)
                                                 {
-                                                    ShaderPropertyType? type = GetPropertyType?.Invoke(mat.shader, new object[] { idx }) as ShaderPropertyType?;
-                                                    //loader.log(LogLevel.Warning, $"  FindPropertyIndex {mat_name} {item.Key} {idx} {type}");
-                                                    if (type != ShaderPropertyType.Float
-                                                        && type != ShaderPropertyType.Range)
+                                                    // Shader.GetPropertyType 은 UnityEngine.Rendering.ShaderPropertyType 을
+                                                    // 돌려준다. 이 클래스의 ShaderPropertyType 과는 이름만 같고 다른 타입이므로
+                                                    // 값을 타입으로 캐스팅해 비교하지 않고 정수 값으로 비교한다.
+                                                    int propertyTypeValue;
+                                                    if (!TryGetShaderPropertyTypeValue(GetPropertyType?.Invoke(mat.shader, new object[] { idx }), out propertyTypeValue)
+                                                        || (propertyTypeValue != (int)ShaderPropertyType.Float
+                                                            && propertyTypeValue != (int)ShaderPropertyType.Range))
                                                     {
                                                         bDoSet = false;
                                                     }
@@ -1424,8 +1497,11 @@ namespace SW_Decensor
                                                     idx = Shader.PropertyToID(item.Key);
                                                 if (idx != null)
                                                 {
-                                                    ShaderPropertyType? type = GetPropertyType?.Invoke(mat.shader, new object[] { idx }) as ShaderPropertyType?;
-                                                    if (type != ShaderPropertyType.Vector && type != ShaderPropertyType.Color)
+                                                    // 위(Float)와 같은 이유로 정수 값으로 비교한다.
+                                                    int propertyTypeValue;
+                                                    if (!TryGetShaderPropertyTypeValue(GetPropertyType?.Invoke(mat.shader, new object[] { idx }), out propertyTypeValue)
+                                                        || (propertyTypeValue != (int)ShaderPropertyType.Vector
+                                                            && propertyTypeValue != (int)ShaderPropertyType.Color))
                                                     {
                                                         bDoSet = false;
                                                     }
