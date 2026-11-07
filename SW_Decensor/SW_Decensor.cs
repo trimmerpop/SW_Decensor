@@ -142,7 +142,9 @@ namespace SW_Decensor
         }
 
         // Unity 6000 + BepInEx 5 조합에서는 플러그인 Awake() 안에서 GameObject/컴포넌트를 만들면
-        // 엔진이 네이티브 크래시한다. 컴포넌트 생성은 엔진 초기화가 끝난 첫 Update() 로 미룬다.
+        // 엔진이 네이티브 크래시하므로 Setup() 을 지연시킨다. 이 컴포넌트는 BepInEx 매니저
+        // 오브젝트에 붙어 있어 첫 씬 로드에서 파괴될 수 있으므로, 주 경로는
+        // SW_Decensor.DeferSetup() 의 SynchronizationContext 게시이고 여기는 백업 트리거다.
         private void Update()
         {
             SW_Decensor.TryDeferredSetup();
@@ -260,12 +262,46 @@ namespace SW_Decensor
 
         static bool bSetupPending = false;
 
+#if !interop
         /// <summary>
-        /// 플러그인 Awake() 시점에는 BepInEx 가 네이티브 AddComponent 를 호출하는 중이라
-        /// 그 안에서 다시 GameObject/컴포넌트를 만들면 Unity 6000 에서 네이티브 크래시가 발생한다.
-        /// 따라서 엔진 초기화가 끝난 첫 Update() 로 Setup() 을 미룬다.
-        /// (il2cpp 는 Load() 시점에 엔진이 초기화되어 있으므로 즉시 실행한다)
+        /// Setup() 을 메인 스레드의 다음 프레임으로 미룬다. (Unity 6000 + BepInEx 5 대응)
+        /// BepInEx 매니저 오브젝트는 첫 씬 로드 때 파괴되는 경우가 있어(Unity 2022 등)
+        /// loader.Update() 를 주 트리거로 쓸 수 없다. 그래서 Unity 의 SynchronizationContext 에
+        /// 직접 게시하고, 한 프레임 뒤에도 컴포넌트가 없으면 다시 만든다.
         /// </summary>
+        static void DeferSetup()
+        {
+            bSetupPending = true;
+            try
+            {
+                SynchronizationContext? context = SynchronizationContext.Current;
+                if (context == null)
+                {
+                    // 컨텍스트가 없으면 loader.Update() 트리거에 맡긴다.
+                    return;
+                }
+                context.Post(delegate
+                {
+                    TryDeferredSetup();
+                    // 첫 씬 로드 전에 생성되어 파괴된 경우를 대비한 재시도.
+                    context.Post(delegate
+                    {
+                        if (Loader != null && Instance == null)
+                        {
+                            loader.log(LogLevel.Warning, "Setup() retry: component was destroyed. recreating.");
+                            Setup();
+                        }
+                    }, null);
+                }, null);
+            }
+            catch (Exception e)
+            {
+                loader.log(LogLevel.Warning, string.Format("Deferred setup failed, running immediately: {0}", e.Message));
+                TryDeferredSetup();
+            }
+        }
+#endif
+
         internal static void TryDeferredSetup()
         {
             if (!bSetupPending)
@@ -281,8 +317,11 @@ namespace SW_Decensor
 #endif
 
             GameObject obj = new GameObject(Metadata.MODNAME);
-            DontDestroyOnLoad(obj);
+            // hideFlags 는 DontDestroyOnLoad 보다 먼저 설정해야 한다.
+            // BepInEx 체인로더 시점(첫 씬 로드 전)에 만든 오브젝트는 HideFlags.DontSave 가 없으면
+            // 첫 씬을 로드할 때 파괴된다. (그러면 Start/Update 가 영원히 호출되지 않는다)
             obj.hideFlags = HideFlags.HideAndDontSave;
+            DontDestroyOnLoad(obj);
             Instance = obj.AddComponent<SW_Decensor>();
         }
 
@@ -294,11 +333,38 @@ namespace SW_Decensor
 #if interop
             Setup();
 #else
-            bSetupPending = true;
+            // Unity 6000 + BepInEx 5 조합에서만 플러그인 Awake() 안의 GameObject 생성이
+            // 네이티브 크래시를 일으키므로, 그 경우에만 다음 프레임으로 미룬다.
+            // 그 외 버전에서는 종전처럼 즉시 생성한다. (지연 경로는 매니저 오브젝트가
+            // 첫 씬 로드에서 파괴되는 게임에서 실행되지 않는다)
+            if (IsUnity6000OrNewer())
+                DeferSetup();
+            else
+                Setup();
 #endif
             tsLoopTimeLimit = TimeSpan.FromMilliseconds(1);
             tsCheckInterval = TimeSpan.FromMilliseconds(500);
         }
+
+#if !interop
+        /// <summary>
+        /// Unity 6000 이상인지 확인한다. (버전 문자열 예: "6000.0.23f1")
+        /// </summary>
+        static bool IsUnity6000OrNewer()
+        {
+            try
+            {
+                string version = Application.unityVersion;
+                if (string.IsNullOrEmpty(version))
+                    return false;
+                int dot = version.IndexOf('.');
+                string major = (dot > 0) ? version.Substring(0, dot) : version;
+                int majorVersion;
+                return int.TryParse(major, out majorVersion) && majorVersion >= 6000;
+            }
+            catch { return false; }
+        }
+#endif
 
         void Start()
         {
